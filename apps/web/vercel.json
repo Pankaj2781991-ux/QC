@@ -1,6 +1,6 @@
 {
   "version": 2,
   "installCommand": "cd ../.. && npm ci",
-  "buildCommand": "cd ../.. && npm -w apps/web run build",
+  "buildCommand": "cd ../.. && npm -w packages/qc-engine run build && npm -w packages/shared run build && npm -w apps/web run build",
   "outputDirectory": ".next"
 }
