@@ -1,0 +1,45 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function tenantId() {
+      return request.auth.token.tenantId;
+    }
+
+    function role() {
+      return request.auth.token.role;
+    }
+
+    function roleRank() {
+      return role() == 'Admin' ? 3 : role() == 'Manager' ? 2 : role() == 'Viewer' ? 1 : 0;
+    }
+
+    function roleAtLeast(minRank) {
+      return signedIn() && roleRank() >= minRank;
+    }
+
+    function inTenant(tid) {
+      return signedIn() && tenantId() == tid;
+    }
+
+    // Uploads associated with QC runs.
+    match /tenants/{tid}/uploads/{runId}/{fileName} {
+      allow read: if inTenant(tid) && roleAtLeast(1);
+      // Allow tenant members to upload inputs. Enforce size/type limits at API layer for full control.
+      allow write: if inTenant(tid) && roleAtLeast(1);
+    }
+
+    // Generated artifacts (e.g. exported reports). Server writes, users can read.
+    match /tenants/{tid}/artifacts/{artifactId}/{fileName} {
+      allow read: if inTenant(tid) && roleAtLeast(1);
+      allow write: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

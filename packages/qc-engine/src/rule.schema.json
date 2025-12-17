@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/qc-rule.schema.json",
+  "title": "QC Rule Definition",
+  "type": "object",
+  "required": ["ruleId", "version", "type", "name", "enabled", "severity", "weight", "params"],
+  "properties": {
+    "ruleId": { "type": "string", "minLength": 1 },
+    "version": { "type": "integer", "minimum": 1 },
+    "type": {
+      "type": "string",
+      "enum": [
+        "TEXT_REGEX",
+        "TEXT_KEYWORD_BLACKLIST",
+        "TEXT_REQUIRED_PHRASE",
+        "NUMERIC_RANGE",
+        "REQUIRED_FIELD",
+        "EXCEL_ALL_CAPS",
+        "EXCEL_REQUIRED_COLUMNS",
+        "AUDIO_DURATION_LIMIT",
+        "SLA_TIME_DIFFERENCE",
+        "TONE_CLASSIFICATION",
+        "IMPLIED_ABUSE_DETECTION"
+      ]
+    },
+    "enabled": { "type": "boolean" },
+    "severity": { "type": "string", "enum": ["BLOCKER", "MAJOR", "MINOR", "INFO"] },
+    "weight": { "type": "number", "minimum": 0, "maximum": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "params": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "TEXT_REGEX" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "required": ["pattern"],
+            "properties": {
+              "fieldPath": { "type": "array", "items": { "type": "string" } },
+              "pattern": { "type": "string", "minLength": 1 },
+              "flags": { "type": "string" },
+              "mustMatch": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "TEXT_KEYWORD_BLACKLIST" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "required": ["keywords"],
+            "properties": {
+              "fieldPath": { "type": "array", "items": { "type": "string" } },
+              "keywords": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+              "caseSensitive": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "TEXT_REQUIRED_PHRASE" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "required": ["phrase"],
+            "properties": {
+              "fieldPath": { "type": "array", "items": { "type": "string" } },
+              "phrase": { "type": "string", "minLength": 1 },
+              "caseSensitive": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "NUMERIC_RANGE" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "required": ["fieldPath"],
+            "properties": {
+              "fieldPath": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+              "min": { "type": "number" },
+              "max": { "type": "number" },
+              "inclusiveMin": { "type": "boolean" },
+              "inclusiveMax": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "REQUIRED_FIELD" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "required": ["fieldPath"],
+            "properties": {
+              "fieldPath": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+              "allowEmptyString": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "EXCEL_REQUIRED_COLUMNS" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "required": ["requiredColumns"],
+            "properties": {
+              "requiredColumns": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+              "caseSensitive": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "EXCEL_ALL_CAPS" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "required": ["column"],
+            "properties": {
+              "column": { "type": "string", "minLength": 1 },
+              "minCapsRatio": { "type": "number", "minimum": 0, "maximum": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "AUDIO_DURATION_LIMIT" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "required": ["maxDurationMs"],
+            "properties": {
+              "maxDurationMs": { "type": "integer", "minimum": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "SLA_TIME_DIFFERENCE" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "required": ["startFieldPath", "endFieldPath", "maxDifferenceMs"],
+            "properties": {
+              "startFieldPath": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+              "endFieldPath": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+              "maxDifferenceMs": { "type": "integer", "minimum": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "TONE_CLASSIFICATION" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "required": ["threshold", "failLabels"],
+            "properties": {
+              "threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+              "failLabels": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "IMPLIED_ABUSE_DETECTION" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "required": ["threshold"],
+            "properties": {
+              "threshold": { "type": "number", "minimum": 0, "maximum": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

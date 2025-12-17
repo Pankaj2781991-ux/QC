@@ -1,0 +1,20 @@
+{
+  "name": "qc-saas-platform",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "lint": "npm -ws run lint",
+    "typecheck": "npm -ws run typecheck",
+    "build": "npm -ws run build",
+    "dev": "npm -w apps/web run dev",
+    "emulators": "firebase emulators:start --project demo-qc --import=./.firebase-data --export-on-exit=./.firebase-data",
+    "format": "npm -ws run format"
+  },
+  "devDependencies": {
+    "firebase-tools": "^13.35.1",
+    "typescript": "^5.7.2"
+  }
+}
