@@ -1,94 +1,94 @@
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    function signedIn() {
-      return request.auth != null;
-    }
-
-    function tenantId() {
-      return request.auth.token.tenantId;
-    }
-
-    function role() {
-      return request.auth.token.role;
-    }
-
-    function roleRank() {
-      return role() == 'Admin' ? 3 : role() == 'Manager' ? 2 : role() == 'Viewer' ? 1 : 0;
-    }
-
-    function roleAtLeast(minRank) {
-      return signedIn() && roleRank() >= minRank;
-    }
-
-    function inTenant(tid) {
-      return signedIn() && tenantId() == tid;
-    }
-
-    // Root tenant directory (readable by tenant members). Mutations are server-only.
-    match /tenants/{tid} {
-      allow get: if inTenant(tid);
-      allow list: if false;
-      allow create, update, delete: if false;
-
-      // Users directory (server-managed). Clients can read self; managers can read all.
-      match /users/{uid} {
-        allow get: if inTenant(tid) && (request.auth.uid == uid || roleAtLeast(2));
-        allow list: if inTenant(tid) && roleAtLeast(2);
-        allow create, update, delete: if false;
+  rules_version = '2';
+  service cloud.firestore {
+    match /databases/{database}/documents {
+      function signedIn() {
+        return request.auth != null;
       }
 
-      // QC templates (server-managed for auditability).
-      match /qc_templates/{templateId} {
-        allow get, list: if inTenant(tid) && roleAtLeast(1);
-        allow create, update, delete: if false;
+      function tenantId() {
+        return request.auth.token.tenantId;
       }
 
-      match /qc_template_versions/{templateVersionId} {
-        allow get, list: if inTenant(tid) && roleAtLeast(1);
-        allow create, update, delete: if false;
+      function role() {
+        return request.auth.token.role;
       }
 
-      match /qc_rules/{ruleId} {
-        allow get, list: if inTenant(tid) && roleAtLeast(1);
-        allow create, update, delete: if false;
+      function roleRank() {
+        return role() == 'Admin' ? 3 : role() == 'Manager' ? 2 : role() == 'Viewer' ? 1 : 0;
       }
 
-      match /qc_runs/{runId} {
-        allow get, list: if inTenant(tid) && roleAtLeast(1);
-        allow create, update, delete: if false;
+      function roleAtLeast(minRank) {
+        return signedIn() && roleRank() >= minRank;
       }
 
-      match /qc_results/{resultId} {
-        allow get, list: if inTenant(tid) && roleAtLeast(1);
-        allow create, update, delete: if false;
+      function inTenant(tid) {
+        return signedIn() && tenantId() == tid;
       }
 
-      match /qc_run_results/{resultId} {
-        allow get, list: if inTenant(tid) && roleAtLeast(1);
+      // Root tenant directory (readable by tenant members). Mutations are server-only.
+      match /tenants/{tid} {
+        allow get: if inTenant(tid);
+        allow list: if false;
         allow create, update, delete: if false;
 
-        match /rule_results/{ruleResultId} {
+        // Users directory (server-managed). Clients can read self; managers can read all.
+        match /users/{uid} {
+          allow get: if inTenant(tid) && (request.auth.uid == uid || roleAtLeast(2));
+          allow list: if inTenant(tid) && roleAtLeast(2);
+          allow create, update, delete: if false;
+        }
+
+        // QC templates (server-managed for auditability).
+        match /qc_templates/{templateId} {
           allow get, list: if inTenant(tid) && roleAtLeast(1);
+          allow create, update, delete: if false;
+        }
+
+        match /qc_template_versions/{templateVersionId} {
+          allow get, list: if inTenant(tid) && roleAtLeast(1);
+          allow create, update, delete: if false;
+        }
+
+        match /qc_rules/{ruleId} {
+          allow get, list: if inTenant(tid) && roleAtLeast(1);
+          allow create, update, delete: if false;
+        }
+
+        match /qc_runs/{runId} {
+          allow get, list: if inTenant(tid) && roleAtLeast(1);
+          allow create, update, delete: if false;
+        }
+
+        match /qc_results/{resultId} {
+          allow get, list: if inTenant(tid) && roleAtLeast(1);
+          allow create, update, delete: if false;
+        }
+
+        match /qc_run_results/{resultId} {
+          allow get, list: if inTenant(tid) && roleAtLeast(1);
+          allow create, update, delete: if false;
+
+          match /rule_results/{ruleResultId} {
+            allow get, list: if inTenant(tid) && roleAtLeast(1);
+            allow create, update, delete: if false;
+          }
+        }
+
+        match /integrations/{integrationId} {
+          allow get, list: if inTenant(tid) && roleAtLeast(2);
+          allow create, update, delete: if false;
+        }
+
+        // Immutable audit trail (server-only writes).
+        match /audit_logs/{auditId} {
+          allow get, list: if inTenant(tid) && roleAtLeast(2);
           allow create, update, delete: if false;
         }
       }
 
-      match /integrations/{integrationId} {
-        allow get, list: if inTenant(tid) && roleAtLeast(2);
-        allow create, update, delete: if false;
+      // Default deny (forces tenant scoping under /tenants/{tid}).
+      match /{document=**} {
+        allow read, write: if false;
       }
-
-      // Immutable audit trail (server-only writes).
-      match /audit_logs/{auditId} {
-        allow get, list: if inTenant(tid) && roleAtLeast(2);
-        allow create, update, delete: if false;
-      }
-    }
-
-    // Default deny (forces tenant scoping under /tenants/{tid}).
-    match /{document=**} {
-      allow read, write: if false;
     }
   }
-}
