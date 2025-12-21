@@ -1,0 +1,12 @@
+# Firebase deploy ignore file for apps/functions
+#
+# We intentionally DO NOT inherit the repo .gitignore here,
+# because apps/functions/vendor is generated and ignored by git,
+# but must be uploaded for deployment (it contains local file: deps).
+
+node_modules
+npm-debug.log*
+firebase-debug.log*
+
+# Optional: exclude TS sources from upload (runtime uses lib/)
+src/

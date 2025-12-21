@@ -1,5 +1,5 @@
-import * as admin from 'firebase-admin';
 import { ApiError } from './errors.js';
+import { getAdmin } from './firebaseAdmin.js';
 export async function requireAuth(authorizationHeader) {
     if (!authorizationHeader?.startsWith('Bearer ')) {
         throw new ApiError('UNAUTHENTICATED', 'Missing Bearer token', 401);
@@ -7,7 +7,8 @@ export async function requireAuth(authorizationHeader) {
     const idToken = authorizationHeader.slice('Bearer '.length).trim();
     if (!idToken)
         throw new ApiError('UNAUTHENTICATED', 'Missing Bearer token', 401);
-    const token = await admin.auth().verifyIdToken(idToken);
+    const { auth } = getAdmin();
+    const token = await auth.verifyIdToken(idToken);
     const tenantId = token.tenantId;
     const role = token.role;
     if (!tenantId || !role) {

@@ -1,11 +1,11 @@
-import * as admin from 'firebase-admin';
 import { ApiError } from './errors.js';
+import { getAdmin, type DecodedIdToken } from './firebaseAdmin.js';
 
 export type AuthedRequest = {
   uid: string;
   tenantId: string;
   role: 'Admin' | 'Manager' | 'Viewer';
-  token: admin.auth.DecodedIdToken;
+  token: DecodedIdToken;
 };
 
 export async function requireAuth(authorizationHeader: string | undefined): Promise<AuthedRequest> {
@@ -16,7 +16,8 @@ export async function requireAuth(authorizationHeader: string | undefined): Prom
   const idToken = authorizationHeader.slice('Bearer '.length).trim();
   if (!idToken) throw new ApiError('UNAUTHENTICATED', 'Missing Bearer token', 401);
 
-  const token = await admin.auth().verifyIdToken(idToken);
+  const { auth } = getAdmin();
+  const token = await auth.verifyIdToken(idToken);
   const tenantId = (token as any).tenantId as string | undefined;
   const role = (token as any).role as AuthedRequest['role'] | undefined;
 

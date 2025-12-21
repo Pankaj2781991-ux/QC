@@ -10,3 +10,6 @@ coverage/
 !.env.example
 !.env.local.example
 .DS_Store
+
+# Functions deploy staging
+apps/functions/vendor/

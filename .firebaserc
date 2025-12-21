@@ -1,5 +1,8 @@
 {
   "projects": {
-    "default": "demo-qc"
-  }
+    "default": "demo-qc",
+    "QC": "quality-check-31e29"
+  },
+  "targets": {},
+  "etags": {}
 }

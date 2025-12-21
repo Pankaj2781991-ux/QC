@@ -1,6 +1,5 @@
 import express from 'express';
 import cors from 'cors';
-import * as admin from 'firebase-admin';
 import { v4 as uuidv4 } from 'uuid';
 import { z } from 'zod';
 
@@ -13,6 +12,7 @@ import { tenantDocPath, tenantSubdocPath, tenantSubcollectionPath } from './lib/
 import { writeAuditLog } from './lib/audit.js';
 import { processQcRun } from './lib/qcProcessor.js';
 import { storeApiKeySecret } from './lib/secretManager.js';
+import { getAdmin, Timestamp } from './lib/firebaseAdmin.js';
 
 const app = express();
 
@@ -27,11 +27,12 @@ app.get('/health', (_req, res) => {
 app.post(
   '/v1/tenants/bootstrap',
   asyncHandler(async (req, res) => {
+    const { auth: adminAuth, db } = getAdmin();
     const authorization = req.header('authorization');
     if (!authorization?.startsWith('Bearer ')) throw new ApiError('UNAUTHENTICATED', 'Missing Bearer token', 401);
 
     const idToken = authorization.slice('Bearer '.length).trim();
-    const token = await admin.auth().verifyIdToken(idToken);
+    const token = await adminAuth.verifyIdToken(idToken);
 
     const existingTenant = (token as any).tenantId as string | undefined;
     if (existingTenant) throw new ApiError('FAILED_PRECONDITION', 'User already provisioned for a tenant', 412);
@@ -40,14 +41,14 @@ app.post(
     const body = bodySchema.parse(req.body);
 
     const tenantId = uuidv4();
-    const tenantRef = admin.firestore().doc(tenantDocPath(tenantId));
-    const userRef = admin.firestore().doc(tenantSubdocPath(tenantId, 'users', token.uid));
+    const tenantRef = db.doc(tenantDocPath(tenantId));
+    const userRef = db.doc(tenantSubdocPath(tenantId, 'users', token.uid));
 
-    await admin.firestore().runTransaction(async (tx) => {
+    await db.runTransaction(async (tx) => {
       tx.create(tenantRef, {
         name: body.tenantName,
         status: 'active',
-        createdAt: admin.firestore.Timestamp.now(),
+        createdAt: Timestamp.now(),
         createdByUid: token.uid
       });
       tx.create(userRef, {
@@ -56,11 +57,11 @@ app.post(
         email: token.email ?? null,
         role: 'Admin',
         status: 'active',
-        createdAt: admin.firestore.Timestamp.now()
+        createdAt: Timestamp.now()
       });
     });
 
-    await admin.auth().setCustomUserClaims(token.uid, { tenantId, role: 'Admin' });
+    await adminAuth.setCustomUserClaims(token.uid, { tenantId, role: 'Admin' });
 
     await writeAuditLog({
       tenantId,
@@ -81,7 +82,8 @@ app.get(
   asyncHandler(async (req, res) => {
     const auth = await requireAuth(req.header('authorization'));
 
-    const snap = await admin.firestore().collection(tenantSubcollectionPath(auth.tenantId, 'qc_templates')).get();
+    const { db } = getAdmin();
+    const snap = await db.collection(tenantSubcollectionPath(auth.tenantId, 'qc_templates')).get();
     res.json({ templates: snap.docs.map((d) => ({ id: d.id, ...d.data() })) });
   })
 );
@@ -95,8 +97,8 @@ app.get(
     const templateId = req.params.templateId;
     if (!templateId) throw new ApiError('INVALID_ARGUMENT', 'templateId is required', 400);
 
-    const snap = await admin
-      .firestore()
+    const { db } = getAdmin();
+    const snap = await db
       .collection(tenantSubcollectionPath(auth.tenantId, 'qc_template_versions'))
       .where('templateId', '==', templateId)
       .orderBy('version', 'desc')
@@ -113,7 +115,8 @@ app.get(
     const auth = await requireAuth(req.header('authorization'));
     requireRole(auth.role, 'Manager');
 
-    const snap = await admin.firestore().collection(tenantSubcollectionPath(auth.tenantId, 'integrations')).get();
+    const { db } = getAdmin();
+    const snap = await db.collection(tenantSubcollectionPath(auth.tenantId, 'integrations')).get();
     res.json({ integrations: snap.docs.map((d) => ({ id: d.id, ...d.data(), credentialsRef: undefined })) });
   })
 );
@@ -123,6 +126,8 @@ app.post(
   asyncHandler(async (req, res) => {
     const auth = await requireAuth(req.header('authorization'));
     requireRole(auth.role, 'Manager');
+
+    const { db } = getAdmin();
 
     const bodySchema = z.object({
       type: z.string().min(1),
@@ -148,16 +153,16 @@ app.post(
       credentialsRef = { secretResourceName: stored.secretResourceName };
     }
 
-    const ref = admin.firestore().doc(tenantSubdocPath(auth.tenantId, 'integrations', integrationId));
+    const ref = db.doc(tenantSubdocPath(auth.tenantId, 'integrations', integrationId));
     await ref.create({
       tenantId: auth.tenantId,
       type: body.type,
       authType: body.authType,
       config: body.config,
       ...(credentialsRef ? { credentialsRef } : {}),
-      createdAt: admin.firestore.Timestamp.now(),
+      createdAt: Timestamp.now(),
       createdByUid: auth.uid,
-      updatedAt: admin.firestore.Timestamp.now()
+      updatedAt: Timestamp.now()
     });
 
     await writeAuditLog({
@@ -180,11 +185,13 @@ app.post(
     const auth = await requireAuth(req.header('authorization'));
     requireRole(auth.role, 'Manager');
 
+    const { db } = getAdmin();
+
     const bodySchema = z.object({ name: z.string().min(2).max(128), description: z.string().max(2048).optional() });
     const body = bodySchema.parse(req.body);
 
     const id = uuidv4();
-    const ref = admin.firestore().doc(tenantSubdocPath(auth.tenantId, 'qc_templates', id));
+    const ref = db.doc(tenantSubdocPath(auth.tenantId, 'qc_templates', id));
 
     await ref.create({
       templateId: id,
@@ -192,9 +199,9 @@ app.post(
       name: body.name,
       description: body.description ?? null,
       currentVersion: 0,
-      createdAt: admin.firestore.Timestamp.now(),
+      createdAt: Timestamp.now(),
       createdByUid: auth.uid,
-      updatedAt: admin.firestore.Timestamp.now()
+      updatedAt: Timestamp.now()
     });
 
     await writeAuditLog({
@@ -216,6 +223,8 @@ app.post(
     const auth = await requireAuth(req.header('authorization'));
     requireRole(auth.role, 'Manager');
 
+    const { db } = getAdmin();
+
     const templateId = req.params.templateId;
     if (!templateId) throw new ApiError('INVALID_ARGUMENT', 'templateId is required', 400);
 
@@ -227,7 +236,7 @@ app.post(
     // Validate rule JSON deterministically.
     const rules = body.ruleSnapshot.map((r) => QcRuleDefinitionSchema.parse(r));
 
-    const templateRef = admin.firestore().doc(tenantSubdocPath(auth.tenantId, 'qc_templates', templateId));
+    const templateRef = db.doc(tenantSubdocPath(auth.tenantId, 'qc_templates', templateId));
     const templateSnap = await templateRef.get();
     if (!templateSnap.exists) throw new ApiError('NOT_FOUND', 'Template not found', 404);
 
@@ -235,19 +244,19 @@ app.post(
     const nextVersion = currentVersion + 1;
 
     const versionId = uuidv4();
-    const versionRef = admin.firestore().doc(tenantSubdocPath(auth.tenantId, 'qc_template_versions', versionId));
+    const versionRef = db.doc(tenantSubdocPath(auth.tenantId, 'qc_template_versions', versionId));
 
-    await admin.firestore().runTransaction(async (tx) => {
+    await db.runTransaction(async (tx) => {
       tx.create(versionRef, {
         tenantId: auth.tenantId,
         templateId,
         version: nextVersion,
         engineVersion: '0.1.0',
         ruleSnapshot: rules,
-        createdAt: admin.firestore.Timestamp.now(),
+        createdAt: Timestamp.now(),
         createdByUid: auth.uid
       });
-      tx.update(templateRef, { currentVersion: nextVersion, updatedAt: admin.firestore.Timestamp.now() });
+      tx.update(templateRef, { currentVersion: nextVersion, updatedAt: Timestamp.now() });
     });
 
     await writeAuditLog({
@@ -269,6 +278,8 @@ app.post(
   asyncHandler(async (req, res) => {
     const auth = await requireAuth(req.header('authorization'));
     requireRole(auth.role, 'Viewer');
+
+    const { db } = getAdmin();
 
     const bodySchema = z.object({
       runId: z.string().uuid().optional(),
@@ -294,7 +305,7 @@ app.post(
     const body = bodySchema.parse(req.body);
 
     const runId = body.runId ?? uuidv4();
-    const runRef = admin.firestore().doc(tenantSubdocPath(auth.tenantId, 'qc_runs', runId));
+    const runRef = db.doc(tenantSubdocPath(auth.tenantId, 'qc_runs', runId));
 
     // Enforce deterministic upload addressing.
     if (body.inputSource === 'UPLOAD' && !body.runId) {
@@ -305,17 +316,14 @@ app.post(
       );
     }
 
-    const templateRef = admin.firestore().doc(tenantSubdocPath(auth.tenantId, 'qc_templates', body.templateId));
+    const templateRef = db.doc(tenantSubdocPath(auth.tenantId, 'qc_templates', body.templateId));
     const templateSnap = await templateRef.get();
     if (!templateSnap.exists) throw new ApiError('NOT_FOUND', 'Template not found', 404);
     const templateName = String((templateSnap.data() as any)?.name ?? '');
     if (!templateName) throw new ApiError('FAILED_PRECONDITION', 'Template name missing', 412);
 
     // Template version is required; templateVersion number is read from the version doc.
-    const versionSnap = await admin
-      .firestore()
-      .doc(tenantSubdocPath(auth.tenantId, 'qc_template_versions', body.templateVersionId))
-      .get();
+    const versionSnap = await db.doc(tenantSubdocPath(auth.tenantId, 'qc_template_versions', body.templateVersionId)).get();
     if (!versionSnap.exists) throw new ApiError('NOT_FOUND', 'Template version not found', 404);
 
     const versionData = versionSnap.data() as any;
@@ -362,7 +370,7 @@ app.post(
     let integrationSnapshot: { integrationId: string; type: string; authType: 'API_KEY' | 'OAUTH'; query?: Record<string, unknown> } | null = null;
     if (body.inputSource === 'INTEGRATION') {
       const integrationId = String(inputRef.integration?.integrationId ?? '');
-      const snap = await admin.firestore().doc(tenantSubdocPath(auth.tenantId, 'integrations', integrationId)).get();
+      const snap = await db.doc(tenantSubdocPath(auth.tenantId, 'integrations', integrationId)).get();
       if (!snap.exists) throw new ApiError('NOT_FOUND', 'Integration not found', 404);
       const data = snap.data() as any;
       integrationSnapshot = {
@@ -390,7 +398,7 @@ app.post(
             }
           : inputRef,
       engineVersion: QC_ENGINE_VERSION,
-      requestedAt: admin.firestore.Timestamp.now(),
+      requestedAt: Timestamp.now(),
       requestedByUid: auth.uid
     });
 
@@ -417,19 +425,17 @@ app.get(
   '/v1/qc-runs/:runId',
   asyncHandler(async (req, res) => {
     const auth = await requireAuth(req.header('authorization'));
+    const { db } = getAdmin();
     const runId = req.params.runId;
     if (!runId) throw new ApiError('INVALID_ARGUMENT', 'runId is required', 400);
 
-    const runSnap = await admin.firestore().doc(tenantSubdocPath(auth.tenantId, 'qc_runs', runId)).get();
+    const runSnap = await db.doc(tenantSubdocPath(auth.tenantId, 'qc_runs', runId)).get();
     if (!runSnap.exists) throw new ApiError('NOT_FOUND', 'Run not found', 404);
 
     const run = runSnap.data() as any;
     let resultSummary: any = null;
     if (run.resultId) {
-      const resultSnap = await admin
-        .firestore()
-        .doc(tenantSubdocPath(auth.tenantId, 'qc_run_results', String(run.resultId)))
-        .get();
+      const resultSnap = await db.doc(tenantSubdocPath(auth.tenantId, 'qc_run_results', String(run.resultId))).get();
       resultSummary = resultSnap.exists ? { id: resultSnap.id, ...resultSnap.data() } : null;
     }
 
@@ -443,6 +449,8 @@ app.get(
     const auth = await requireAuth(req.header('authorization'));
     requireRole(auth.role, 'Viewer');
 
+    const { db } = getAdmin();
+
     const runId = req.params.runId;
     if (!runId) throw new ApiError('INVALID_ARGUMENT', 'runId is required', 400);
 
@@ -452,15 +460,13 @@ app.get(
     });
     const q = querySchema.parse(req.query);
 
-    const runSnap = await admin.firestore().doc(tenantSubdocPath(auth.tenantId, 'qc_runs', runId)).get();
+    const runSnap = await db.doc(tenantSubdocPath(auth.tenantId, 'qc_runs', runId)).get();
     if (!runSnap.exists) throw new ApiError('NOT_FOUND', 'Run not found', 404);
     const run = runSnap.data() as any;
     const resultId = run.resultId as string | undefined;
     if (!resultId) throw new ApiError('FAILED_PRECONDITION', 'Run has no results yet', 412);
 
-    const coll = admin
-      .firestore()
-      .collection(tenantSubcollectionPath(auth.tenantId, `qc_run_results/${resultId}/rule_results`));
+    const coll = db.collection(tenantSubcollectionPath(auth.tenantId, `qc_run_results/${resultId}/rule_results`));
 
     let query = coll.orderBy('order', 'asc').limit(q.limit);
     if (q.startAfter >= 0) query = query.startAfter(q.startAfter);

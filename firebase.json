@@ -3,6 +3,9 @@
     "source": "apps/functions",
     "runtime": "nodejs20",
     "predeploy": [
+      "npm -w packages/qc-engine run build",
+      "npm -w packages/shared run build",
+      "node apps/functions/scripts/prepare-deploy.mjs",
       "npm --prefix \"$RESOURCE_DIR\" run build"
     ]
   },

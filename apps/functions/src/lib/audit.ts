@@ -1,7 +1,7 @@
-import * as admin from 'firebase-admin';
 import { v4 as uuidv4 } from 'uuid';
 import type { AuditAction, AuditLogEntry } from '@qc/shared';
 import { tenantSubdocPath } from './firestorePaths.js';
+import { getAdmin, Timestamp } from './firebaseAdmin.js';
 
 export async function writeAuditLog(input: {
   tenantId: string;
@@ -26,10 +26,10 @@ export async function writeAuditLog(input: {
     ...(input.meta ? { meta: input.meta } : {})
   };
 
-  await admin
-    .firestore()
+  const { db } = getAdmin();
+  await db
     .doc(tenantSubdocPath(input.tenantId, 'audit_logs', id))
-    .create({ ...entry, at: admin.firestore.Timestamp.fromDate(new Date(entry.at)) });
+    .create({ ...entry, at: Timestamp.fromDate(new Date(entry.at)) });
 
   return id;
 }

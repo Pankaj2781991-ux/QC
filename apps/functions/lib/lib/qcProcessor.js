@@ -1,4 +1,3 @@
-import * as admin from 'firebase-admin';
 import { v4 as uuidv4 } from 'uuid';
 import { QcRuleDefinitionSchema, runQc } from '@qc/qc-engine';
 import { tenantSubdocPath } from './firestorePaths.js';
@@ -7,9 +6,11 @@ import { writeAuditLog } from './audit.js';
 import { accessSecretString } from './secretManager.js';
 import { getConnectorForIntegration } from '../connectors/registry.js';
 import { asPublicError } from './qcPublicError.js';
+import { getAdmin, Timestamp } from './firebaseAdmin.js';
 import { fingerprintFromNormalizedInput, mapRuleResultToDoc, sha256Base16, summarizeRuleStatuses } from './qcResultMapping.js';
 async function fetchTemplateVersion(tenantId, templateVersionId) {
-    const snap = await admin.firestore().doc(tenantSubdocPath(tenantId, 'qc_template_versions', templateVersionId)).get();
+    const { db } = getAdmin();
+    const snap = await db.doc(tenantSubdocPath(tenantId, 'qc_template_versions', templateVersionId)).get();
     if (!snap.exists)
         throw new Error('Template version not found');
     return snap.data();
@@ -21,7 +22,8 @@ async function loadInputForRun(tenantId, run) {
     if (run.inputSource === 'UPLOAD') {
         if (!run.inputRef.upload?.storagePath)
             throw new Error('Missing storagePath');
-        const bucket = admin.storage().bucket();
+        const { storage } = getAdmin();
+        const bucket = storage.bucket();
         const file = bucket.file(run.inputRef.upload.storagePath);
         const [buffer] = await file.download();
         // Attempt to use stored metadata if present.
@@ -39,10 +41,8 @@ async function loadInputForRun(tenantId, run) {
     if (run.inputSource === 'INTEGRATION') {
         if (!run.inputRef.integration?.integrationId)
             throw new Error('Missing integrationId');
-        const snap = await admin
-            .firestore()
-            .doc(tenantSubdocPath(tenantId, 'integrations', run.inputRef.integration.integrationId))
-            .get();
+        const { db } = getAdmin();
+        const snap = await db.doc(tenantSubdocPath(tenantId, 'integrations', run.inputRef.integration.integrationId)).get();
         if (!snap.exists)
             throw new Error('Integration not found');
         const integration = snap.data();
@@ -80,8 +80,9 @@ async function loadInputForRun(tenantId, run) {
     throw new Error(`Unsupported inputSource: ${run.inputSource}`);
 }
 export async function processQcRun(input) {
-    const runRef = admin.firestore().doc(tenantSubdocPath(input.tenantId, 'qc_runs', input.runId));
-    await admin.firestore().runTransaction(async (tx) => {
+    const { db, storage } = getAdmin();
+    const runRef = db.doc(tenantSubdocPath(input.tenantId, 'qc_runs', input.runId));
+    await db.runTransaction(async (tx) => {
         const snap = await tx.get(runRef);
         if (!snap.exists)
             throw new Error('Run not found');
@@ -90,10 +91,7 @@ export async function processQcRun(input) {
             return;
         if (run.status !== 'QUEUED')
             return;
-        tx.update(runRef, {
-            status: 'RUNNING',
-            startedAt: admin.firestore.Timestamp.now()
-        });
+        tx.update(runRef, { status: 'RUNNING', startedAt: Timestamp.now() });
     });
     const runSnap = await runRef.get();
     const run = runSnap.data();
@@ -129,7 +127,7 @@ export async function processQcRun(input) {
         let effectiveFingerprint;
         if (run.inputSource === 'UPLOAD') {
             const storagePath = uploadSource.storagePath;
-            const bucket = admin.storage().bucket();
+            const bucket = storage.bucket();
             const file = bucket.file(storagePath);
             const [buffer] = await file.download();
             const bytesHash = sha256Base16(buffer);
@@ -157,9 +155,9 @@ export async function processQcRun(input) {
             // AI signals are always optional and must be supplied by explicit service calls.
             options: { passScoreThreshold: 1, blockerFailureForcesFail: true }
         });
-        const executedAt = admin.firestore.Timestamp.fromDate(new Date(result.summary.executedAt));
+        const executedAt = Timestamp.fromDate(new Date(result.summary.executedAt));
         const resultId = uuidv4();
-        const resultRef = admin.firestore().doc(tenantSubdocPath(input.tenantId, 'qc_run_results', resultId));
+        const resultRef = db.doc(tenantSubdocPath(input.tenantId, 'qc_run_results', resultId));
         const ruleResults = result.ruleResults.map((rr, i) => mapRuleResultToDoc({
             order: i,
             rule: rules[i],
@@ -178,12 +176,12 @@ export async function processQcRun(input) {
         // Prefer single atomic batch when feasible.
         const totalWritesNeeded = 1 /* result */ + ruleResults.length + 1 /* run update */;
         if (totalWritesNeeded <= 450) {
-            const batch = admin.firestore().batch();
+            const batch = db.batch();
             batch.create(resultRef, {
                 resultId,
                 tenantId: input.tenantId,
                 runId: run.runId,
-                createdAt: admin.firestore.Timestamp.now(),
+                createdAt: Timestamp.now(),
                 engineVersion: result.summary.engineVersion,
                 executedAt,
                 summary: {
@@ -208,7 +206,7 @@ export async function processQcRun(input) {
             }
             batch.update(runRef, {
                 status: 'SUCCEEDED',
-                completedAt: admin.firestore.Timestamp.now(),
+                completedAt: Timestamp.now(),
                 resultId,
                 inputFingerprint: effectiveFingerprint
             });
@@ -220,7 +218,7 @@ export async function processQcRun(input) {
                 resultId,
                 tenantId: input.tenantId,
                 runId: run.runId,
-                createdAt: admin.firestore.Timestamp.now(),
+                createdAt: Timestamp.now(),
                 engineVersion: result.summary.engineVersion,
                 executedAt,
                 summary: {
@@ -239,7 +237,7 @@ export async function processQcRun(input) {
             });
             const chunkSize = 400;
             for (let i = 0; i < ruleResults.length; i += chunkSize) {
-                const batch = admin.firestore().batch();
+                const batch = db.batch();
                 const chunk = ruleResults.slice(i, i + chunkSize);
                 for (const rr of chunk) {
                     const rrId = uuidv4();
@@ -248,7 +246,7 @@ export async function processQcRun(input) {
                 }
                 await batch.commit();
             }
-            await admin.firestore().runTransaction(async (tx) => {
+            await db.runTransaction(async (tx) => {
                 const latest = await tx.get(runRef);
                 if (!latest.exists)
                     throw new Error('Run not found');
@@ -258,7 +256,7 @@ export async function processQcRun(input) {
                 tx.update(resultRef, { writeState: 'COMPLETE' });
                 tx.update(runRef, {
                     status: 'SUCCEEDED',
-                    completedAt: admin.firestore.Timestamp.now(),
+                    completedAt: Timestamp.now(),
                     resultId,
                     inputFingerprint: effectiveFingerprint
                 });
@@ -286,7 +284,7 @@ export async function processQcRun(input) {
             });
         await runRef.update({
             status: 'FAILED',
-            completedAt: admin.firestore.Timestamp.now(),
+            completedAt: Timestamp.now(),
             error: publicErr
         });
         await writeAuditLog({
