@@ -64,7 +64,7 @@ export default function DashboardPage() {
                 await user.getIdToken(true);
 
                 // The AuthProvider listens for token changes; a hard refresh is the most reliable.
-                window.location.replace('/dashboard');
+                window.location.replace('/templates');
 
                 // Use resp to avoid unused variable linting if enabled.
                 void resp;
@@ -100,11 +100,17 @@ export default function DashboardPage() {
       ) : (
         <div className="rounded-lg border bg-white p-4">
           <h2 className="text-lg font-semibold text-zinc-950">Quick links</h2>
-          <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-zinc-700">
-            <li>Templates</li>
-            <li>Run QC</li>
-            <li>Integrations</li>
-          </ul>
+          <div className="mt-3 flex flex-wrap gap-3 text-sm">
+            <a className="rounded border px-3 py-2 text-zinc-900 hover:bg-zinc-50" href="/templates">
+              Templates
+            </a>
+            <a className="rounded border px-3 py-2 text-zinc-900 hover:bg-zinc-50" href="/runs/new">
+              Run QC
+            </a>
+            <a className="rounded border px-3 py-2 text-zinc-900 hover:bg-zinc-50" href="/integrations">
+              Integrations
+            </a>
+          </div>
         </div>
       )}
     </div>

@@ -224,6 +224,97 @@ app.post(
   })
 );
 
+app.patch(
+  '/v1/templates/:templateId',
+  asyncHandler(async (req, res) => {
+    const auth = await requireAuth(req.header('authorization'));
+    requireRole(auth.role, 'Manager');
+
+    const templateId = req.params.templateId;
+    if (!templateId) throw new ApiError('INVALID_ARGUMENT', 'templateId is required', 400);
+
+    const { db } = getAdmin();
+    const ref = db.doc(tenantSubdocPath(auth.tenantId, 'qc_templates', templateId));
+    const snap = await ref.get();
+    if (!snap.exists) throw new ApiError('NOT_FOUND', 'Template not found', 404);
+    if (snap.get('tenantId') !== auth.tenantId) throw new ApiError('FORBIDDEN', 'Template belongs to another tenant', 403);
+
+    const bodySchema = z.object({ name: z.string().min(2).max(128).optional(), description: z.string().max(2048).optional() });
+    const body = bodySchema.parse(req.body);
+    if (!body.name && typeof body.description === 'undefined') {
+      throw new ApiError('INVALID_ARGUMENT', 'Nothing to update', 400);
+    }
+
+    const update: Record<string, unknown> = { updatedAt: Timestamp.now() };
+    if (body.name) update.name = body.name;
+    if (typeof body.description !== 'undefined') update.description = body.description ?? null;
+
+    await ref.update(update);
+
+    await writeAuditLog({
+      tenantId: auth.tenantId,
+      actorUid: auth.uid,
+      actorRole: auth.role,
+      action: 'TEMPLATE_UPDATE',
+      resourceType: 'qc_template',
+      resourceId: templateId,
+      meta: { ...(body.name ? { name: body.name } : {}), ...(typeof body.description !== 'undefined' ? { description: body.description } : {}) }
+    });
+
+    res.json({ templateId });
+  })
+);
+
+app.delete(
+  '/v1/templates/:templateId',
+  asyncHandler(async (req, res) => {
+    const auth = await requireAuth(req.header('authorization'));
+    requireRole(auth.role, 'Manager');
+
+    const templateId = req.params.templateId;
+    if (!templateId) throw new ApiError('INVALID_ARGUMENT', 'templateId is required', 400);
+
+    const { db } = getAdmin();
+    const ref = db.doc(tenantSubdocPath(auth.tenantId, 'qc_templates', templateId));
+    const snap = await ref.get();
+    if (!snap.exists) throw new ApiError('NOT_FOUND', 'Template not found', 404);
+    if (snap.get('tenantId') !== auth.tenantId) throw new ApiError('FORBIDDEN', 'Template belongs to another tenant', 403);
+
+    // Delete versions for this template.
+    const versionsSnap = await db
+      .collection(tenantSubcollectionPath(auth.tenantId, 'qc_template_versions'))
+      .where('templateId', '==', templateId)
+      .get();
+
+    const batchSize = 400;
+    let batch = db.batch();
+    let ops = 0;
+    versionsSnap.docs.forEach((d) => {
+      batch.delete(d.ref);
+      ops++;
+      if (ops >= batchSize) {
+        batch.commit();
+        batch = db.batch();
+        ops = 0;
+      }
+    });
+    if (ops > 0) await batch.commit();
+
+    await ref.delete();
+
+    await writeAuditLog({
+      tenantId: auth.tenantId,
+      actorUid: auth.uid,
+      actorRole: auth.role,
+      action: 'TEMPLATE_DELETE',
+      resourceType: 'qc_template',
+      resourceId: templateId
+    });
+
+    res.json({ templateId, deletedVersions: versionsSnap.size });
+  })
+);
+
 app.post(
   '/v1/templates/:templateId/versions',
   asyncHandler(async (req, res) => {
