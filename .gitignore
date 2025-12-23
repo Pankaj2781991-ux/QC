@@ -13,3 +13,6 @@ coverage/
 
 # Functions deploy staging
 apps/functions/vendor/
+
+# Generated Firebase Functions manifest (used by CLI discovery)
+apps/functions/functions.yaml

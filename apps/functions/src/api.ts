@@ -98,14 +98,21 @@ app.get(
     if (!templateId) throw new ApiError('INVALID_ARGUMENT', 'templateId is required', 400);
 
     const { db } = getAdmin();
+    // NOTE: A (templateId ASC, version DESC) composite index is recommended for this query.
+    // Some environments/users may not have permission to deploy Firestore indexes via CLI.
+    // To keep the UI working, fetch a bounded set and sort in memory.
     const snap = await db
       .collection(tenantSubcollectionPath(auth.tenantId, 'qc_template_versions'))
       .where('templateId', '==', templateId)
-      .orderBy('version', 'desc')
-      .limit(25)
+      .limit(200)
       .get();
 
-    res.json({ versions: snap.docs.map((d) => ({ id: d.id, ...d.data() })) });
+    const versions = snap.docs
+      .map((d) => ({ id: d.id, ...(d.data() as any) }))
+      .sort((a, b) => (Number(b.version ?? 0) || 0) - (Number(a.version ?? 0) || 0))
+      .slice(0, 25);
+
+    res.json({ versions });
   })
 );
 
