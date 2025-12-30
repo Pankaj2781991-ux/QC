@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import Link from 'next/link';
 
 import { useAuth } from '../../../../lib/auth';
@@ -19,6 +19,21 @@ type Template = {
 
 type TemplateResponse = {
     template: Template;
+};
+
+type TemplateVersion = {
+    id: string;
+    version?: number;
+    ruleSnapshot?: unknown[];
+};
+
+type TemplateVersionsListResponse = {
+    versions: TemplateVersion[];
+};
+
+type TemplateVersionCreateResponse = {
+    templateVersionId: string;
+    version: number;
 };
 
 type Severity = 'BLOCKER' | 'MAJOR' | 'MINOR' | 'INFO';
@@ -212,7 +227,6 @@ function fromRuleSnapshot(snapshot: unknown[]): RuleBuilder[] {
 
 export default function TemplateRulesPage() {
     const params = useParams();
-    const router = useRouter();
     const templateId = params.templateId as string;
 
     const { user, claims, loading } = useAuth();
@@ -234,7 +248,19 @@ export default function TemplateRulesPage() {
             const client = await createAuthedClient(user);
             const resp = await client.request<TemplateResponse>(`/v1/templates/${encodeURIComponent(templateId)}`);
             setTemplate(resp.template);
-            setRules(fromRuleSnapshot(resp.template.rules ?? []));
+
+            // Prefer the latest version's snapshot (versioned templates).
+            // Fall back to template.rules for older tenants/data.
+            try {
+                const versionsResp = await client.request<TemplateVersionsListResponse>(
+                    `/v1/templates/${encodeURIComponent(templateId)}/versions`
+                );
+                const latest = (versionsResp.versions ?? [])[0];
+                const snapshot = Array.isArray(latest?.ruleSnapshot) ? latest!.ruleSnapshot! : (resp.template.rules ?? []);
+                setRules(fromRuleSnapshot(Array.isArray(snapshot) ? snapshot : []));
+            } catch {
+                setRules(fromRuleSnapshot(resp.template.rules ?? []));
+            }
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Unknown error');
         } finally {
@@ -249,15 +275,20 @@ export default function TemplateRulesPage() {
         setSuccessMessage(null);
         try {
             const snapshot = toRuleSnapshot(rules);
+            if (snapshot.length === 0) throw new Error('Add at least one rule before saving.');
             // Validate rules client-side
             snapshot.forEach((r) => void QcRuleDefinitionSchema.parse(r));
 
             const client = await createAuthedClient(user);
-            await client.request(`/v1/templates/${encodeURIComponent(templateId)}/rules`, {
-                method: 'PUT',
-                body: JSON.stringify({ rules: snapshot })
-            });
-            setSuccessMessage(`Saved ${rules.length} rule(s) successfully.`);
+            const resp = await client.request<TemplateVersionCreateResponse>(
+                `/v1/templates/${encodeURIComponent(templateId)}/versions`,
+                {
+                    method: 'POST',
+                    body: JSON.stringify({ ruleSnapshot: snapshot })
+                }
+            );
+
+            setSuccessMessage(`Saved ${rules.length} rule(s) as version v${resp.version}.`);
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Unknown error');
         } finally {
