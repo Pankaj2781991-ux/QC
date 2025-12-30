@@ -150,7 +150,7 @@ export default function RunNewPage() {
                 method: 'POST',
                 body: JSON.stringify({
                   runId: newRunId,
-                  mode: 'ASYNC',
+                  mode: 'SYNC',
                   templateId: selectedTemplateId,
                   inputSource: 'UPLOAD',
                   upload: {
