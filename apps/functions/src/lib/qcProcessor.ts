@@ -28,7 +28,7 @@ export type QcRunDoc = {
   status: QcRunStatus;
   mode: 'SYNC' | 'ASYNC';
   templateId: string;
-  templateVersionId: string;
+  templateVersionId?: string;
   templateVersion: number;
   templateName?: string;
   inputSource: 'UPLOAD' | 'INTEGRATION' | 'INLINE';
@@ -79,6 +79,14 @@ async function fetchTemplateVersion(tenantId: string, templateVersionId: string)
   const snap = await db.doc(tenantSubdocPath(tenantId, 'qc_template_versions', templateVersionId)).get();
   if (!snap.exists) throw new Error('Template version not found');
   return snap.data() as TemplateVersionDoc;
+}
+
+async function fetchTemplateRules(tenantId: string, templateId: string): Promise<unknown[]> {
+  const { db } = getAdmin();
+  const snap = await db.doc(tenantSubdocPath(tenantId, 'qc_templates', templateId)).get();
+  if (!snap.exists) throw new Error('Template not found');
+  const data = snap.data() as any;
+  return data?.rules ?? [];
 }
 
 async function loadInputForRun(tenantId: string, run: QcRunDoc): Promise<QcNormalizedInput> {
@@ -171,8 +179,15 @@ export async function processQcRun(input: { tenantId: string; runId: string; act
   if (run.status !== 'RUNNING') return;
 
   try {
-    const templateVersion = await fetchTemplateVersion(input.tenantId, run.templateVersionId);
-    const rules = templateVersion.ruleSnapshot.map((r) => QcRuleDefinitionSchema.parse(r) as any);
+    // Fetch rules - from version if provided, otherwise from template directly
+    let ruleSnapshot: unknown[];
+    if (run.templateVersionId) {
+      const templateVersion = await fetchTemplateVersion(input.tenantId, run.templateVersionId);
+      ruleSnapshot = templateVersion.ruleSnapshot;
+    } else {
+      ruleSnapshot = await fetchTemplateRules(input.tenantId, run.templateId);
+    }
+    const rules = ruleSnapshot.map((r) => QcRuleDefinitionSchema.parse(r) as any);
 
     // Fail fast on invalid upload references.
     const uploadSource = run.inputSource === 'UPLOAD' ? run.inputRef.upload : undefined;
@@ -244,12 +259,12 @@ export async function processQcRun(input: { tenantId: string; runId: string; act
         result: rr,
         ...(run.inputSource === 'UPLOAD'
           ? {
-              source: {
-                ...(uploadSource?.storagePath ? { storagePath: uploadSource.storagePath } : {}),
-                ...(uploadSource?.fileName ? { fileName: uploadSource.fileName } : {}),
-                ...(uploadSource?.contentType ? { contentType: uploadSource.contentType } : {})
-              }
+            source: {
+              ...(uploadSource?.storagePath ? { storagePath: uploadSource.storagePath } : {}),
+              ...(uploadSource?.fileName ? { fileName: uploadSource.fileName } : {}),
+              ...(uploadSource?.contentType ? { contentType: uploadSource.contentType } : {})
             }
+          }
           : {})
       })
     );
@@ -273,7 +288,7 @@ export async function processQcRun(input: { tenantId: string; runId: string; act
           ruleCounts
         },
         integrity: {
-          templateVersionId: run.templateVersionId,
+          ...(run.templateVersionId ? { templateVersionId: run.templateVersionId } : { templateId: run.templateId }),
           templateVersion: run.templateVersion,
           inputFingerprint: effectiveFingerprint
         }
@@ -312,7 +327,7 @@ export async function processQcRun(input: { tenantId: string; runId: string; act
           ruleCounts
         },
         integrity: {
-          templateVersionId: run.templateVersionId,
+          ...(run.templateVersionId ? { templateVersionId: run.templateVersionId } : { templateId: run.templateId }),
           templateVersion: run.templateVersion,
           inputFingerprint: effectiveFingerprint
         },
@@ -361,12 +376,12 @@ export async function processQcRun(input: { tenantId: string; runId: string; act
       err && typeof err === 'object' && 'category' in (err as any) && 'code' in (err as any) && 'message' in (err as any)
         ? (err as QcPublicError)
         : asPublicError({
-            category: 'EXECUTION',
-            code: 'EXECUTION_FAILED',
-            message: 'The run could not be completed.',
-            help: 'Try again. If the issue persists, contact support with the run ID.',
-            retryable: true
-          });
+          category: 'EXECUTION',
+          code: 'EXECUTION_FAILED',
+          message: 'The run could not be completed.',
+          help: 'Try again. If the issue persists, contact support with the run ID.',
+          retryable: true
+        });
 
     await runRef.update({
       status: 'FAILED',

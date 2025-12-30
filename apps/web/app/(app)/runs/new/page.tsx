@@ -12,22 +12,11 @@ type Template = {
   id: string;
   templateId?: string;
   name?: string;
-  currentVersion?: number;
+  rules?: unknown[];
 };
 
 type TemplatesListResponse = {
   templates: Template[];
-};
-
-type TemplateVersion = {
-  id: string;
-  templateId?: string;
-  version?: number;
-  createdAt?: unknown;
-};
-
-type TemplateVersionsResponse = {
-  versions: TemplateVersion[];
 };
 
 type CreateRunResponse = {
@@ -41,7 +30,6 @@ type RunGetResponse = {
     status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
     mode: 'SYNC' | 'ASYNC';
     templateId: string;
-    templateVersionId: string;
     templateVersion: number;
     inputSource: 'UPLOAD' | 'INTEGRATION' | 'INLINE';
     error?: { message: string };
@@ -55,10 +43,8 @@ export default function RunNewPage() {
   const router = useRouter();
 
   const [templates, setTemplates] = useState<Template[]>([]);
-  const [versions, setVersions] = useState<TemplateVersion[]>([]);
 
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
-  const [selectedVersionId, setSelectedVersionId] = useState<string>('');
   const [file, setFile] = useState<File | null>(null);
 
   const [busy, setBusy] = useState(false);
@@ -73,18 +59,15 @@ export default function RunNewPage() {
 
   const canRun = useMemo(() => Boolean(user && claims.tenantId), [user, claims.tenantId]);
 
+  // Check if selected template has rules
+  const selectedTemplate = templates.find((t) => (t.templateId ?? t.id) === selectedTemplateId);
+  const hasRules = selectedTemplate && Array.isArray(selectedTemplate.rules) && selectedTemplate.rules.length > 0;
+
   async function loadTemplates() {
     if (!user) return;
     const client = await createAuthedClient(user);
     const resp = await client.request<TemplatesListResponse>('/v1/templates');
     setTemplates(resp.templates ?? []);
-  }
-
-  async function loadVersions(templateId: string) {
-    if (!user) return;
-    const client = await createAuthedClient(user);
-    const resp = await client.request<TemplateVersionsResponse>(`/v1/templates/${encodeURIComponent(templateId)}/versions`);
-    setVersions(resp.versions ?? []);
   }
 
   async function pollOnce(id: string) {
@@ -118,13 +101,6 @@ export default function RunNewPage() {
     };
   }, [loading, canRun]);
 
-  useEffect(() => {
-    setVersions([]);
-    setSelectedVersionId('');
-    if (!selectedTemplateId) return;
-    void loadVersions(selectedTemplateId).catch((e) => setError(e instanceof Error ? e.message : 'Unknown error'));
-  }, [selectedTemplateId]);
-
   if (loading) return <div>Loading…</div>;
   if (!user) return null;
 
@@ -140,8 +116,8 @@ export default function RunNewPage() {
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-2xl font-semibold text-zinc-950">Run QC (Upload + polling)</h1>
-        <p className="mt-1 text-sm text-zinc-600">Uploads a file to Storage and starts an ASYNC run, then polls status.</p>
+        <h1 className="text-2xl font-semibold text-zinc-950">Run QC</h1>
+        <p className="mt-1 text-sm text-zinc-600">Select a template and upload a file to run QC checks.</p>
       </div>
 
       {error ? <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div> : null}
@@ -157,7 +133,7 @@ export default function RunNewPage() {
             setRunScore(null);
             try {
               if (!selectedTemplateId) throw new Error('Select a template');
-              if (!selectedVersionId) throw new Error('Select a template version');
+              if (!hasRules) throw new Error('Selected template has no rules. Add rules first.');
               if (!file) throw new Error('Select a file');
 
               const newRunId = crypto.randomUUID();
@@ -176,7 +152,6 @@ export default function RunNewPage() {
                   runId: newRunId,
                   mode: 'ASYNC',
                   templateId: selectedTemplateId,
-                  templateVersionId: selectedVersionId,
                   inputSource: 'UPLOAD',
                   upload: {
                     storagePath,
@@ -215,34 +190,21 @@ export default function RunNewPage() {
               </option>
               {templates.map((t) => {
                 const id = t.templateId ?? t.id;
+                const rulesCount = Array.isArray(t.rules) ? t.rules.length : 0;
                 return (
                   <option key={t.id} value={id}>
-                    {t.name ?? id}
+                    {t.name ?? id} ({rulesCount} rules)
                   </option>
                 );
               })}
             </select>
           </label>
 
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-zinc-700">Template version</span>
-            <select
-              className="rounded border px-3 py-2"
-              value={selectedVersionId}
-              onChange={(e) => setSelectedVersionId(e.target.value)}
-              required
-              disabled={!selectedTemplateId}
-            >
-              <option value="" disabled>
-                {selectedTemplateId ? 'Select…' : 'Select a template first'}
-              </option>
-              {versions.map((v) => (
-                <option key={v.id} value={v.id}>
-                  v{v.version ?? '?'} ({v.id})
-                </option>
-              ))}
-            </select>
-          </label>
+          {selectedTemplateId && !hasRules ? (
+            <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              This template has no rules. <a href={`/templates/${encodeURIComponent(selectedTemplateId)}`} className="underline">Add rules first</a>.
+            </div>
+          ) : null}
 
           <label className="flex flex-col gap-1">
             <span className="text-sm text-zinc-700">Upload file</span>
@@ -257,7 +219,7 @@ export default function RunNewPage() {
           <div className="flex items-center gap-3">
             <button
               className="w-fit rounded bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
-              disabled={busy}
+              disabled={busy || !hasRules}
               type="submit"
             >
               {busy ? 'Working…' : 'Start run'}
