@@ -39,7 +39,7 @@ export default function TemplatesPage() {
   const [editName, setEditName] = useState('');
   const [editDescription, setEditDescription] = useState('');
 
-  const canCreate = useMemo(() => roleAtLeast(claims.role, 'Manager'), [claims.role]);
+  const canManageTemplates = useMemo(() => roleAtLeast(claims.role, 'Admin'), [claims.role]);
 
   async function refresh() {
     if (!user) return;
@@ -61,7 +61,7 @@ export default function TemplatesPage() {
   }, [loading, user, claims.tenantId]);
 
   function beginEdit(t: Template) {
-    setEditingId(t.templateId ?? t.id);
+    setEditingId(t.id);
     setEditName(t.name ?? '');
     setEditDescription(t.description ?? '');
   }
@@ -114,7 +114,8 @@ export default function TemplatesPage() {
               </thead>
               <tbody>
                 {templates.map((t) => {
-                  const id = t.templateId ?? t.id;
+                  const id = t.id;
+                  const displayId = t.templateId ?? t.id;
                   const rulesCount = Array.isArray(t.rules) ? t.rules.length : 0;
                   return (
                     <tr key={t.id} className="border-b last:border-b-0">
@@ -130,7 +131,7 @@ export default function TemplatesPage() {
                       <td className="py-2 pr-4 text-zinc-700">
                         {rulesCount} rule{rulesCount !== 1 ? 's' : ''}
                       </td>
-                      <td className="py-2 pr-4 font-mono text-xs text-zinc-700">{id}</td>
+                      <td className="py-2 pr-4 font-mono text-xs text-zinc-700">{displayId}</td>
                       <td className="py-2 pr-4 text-sm text-zinc-700">
                         <div className="flex flex-wrap gap-2">
                           <Link
@@ -143,7 +144,7 @@ export default function TemplatesPage() {
                             type="button"
                             className="rounded border bg-white px-2 py-1 text-xs hover:bg-zinc-50 disabled:opacity-60"
                             onClick={() => beginEdit(t)}
-                            disabled={!canCreate}
+                            disabled={!canManageTemplates}
                           >
                             Edit
                           </button>
@@ -151,7 +152,7 @@ export default function TemplatesPage() {
                             type="button"
                             className="rounded border bg-white px-2 py-1 text-xs hover:bg-red-50 disabled:opacity-60"
                             onClick={async () => {
-                              if (!canCreate) return;
+                              if (!canManageTemplates) return;
                               const confirm = window.confirm('Delete this template and its rules?');
                               if (!confirm) return;
                               try {
@@ -173,7 +174,7 @@ export default function TemplatesPage() {
                                 setBusy(false);
                               }
                             }}
-                            disabled={!canCreate}
+                            disabled={!canManageTemplates}
                           >
                             Delete
                           </button>
@@ -259,7 +260,7 @@ export default function TemplatesPage() {
         ) : null}
       </div>
 
-      {canCreate ? (
+      {canManageTemplates ? (
         <div className="rounded-lg border bg-white p-4">
           <h2 className="text-lg font-semibold text-zinc-950">Create template</h2>
           <p className="mt-1 text-sm text-zinc-600">
@@ -311,7 +312,7 @@ export default function TemplatesPage() {
           </form>
         </div>
       ) : (
-        <div className="rounded-lg border bg-white p-4 text-sm text-zinc-600">Requires Manager or Admin to create templates.</div>
+        <div className="rounded-lg border bg-white p-4 text-sm text-zinc-600">Requires Admin to create templates.</div>
       )}
     </div>
   );

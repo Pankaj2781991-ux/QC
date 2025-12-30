@@ -15,6 +15,14 @@ async function fetchTemplateVersion(tenantId, templateVersionId) {
         throw new Error('Template version not found');
     return snap.data();
 }
+async function fetchTemplateRules(tenantId, templateId) {
+    const { db } = getAdmin();
+    const snap = await db.doc(tenantSubdocPath(tenantId, 'qc_templates', templateId)).get();
+    if (!snap.exists)
+        throw new Error('Template not found');
+    const data = snap.data();
+    return data?.rules ?? [];
+}
 async function loadInputForRun(tenantId, run) {
     if (run.inputSource === 'INLINE') {
         return normalizeInlineJson(run.inputRef.inline);
@@ -98,8 +106,16 @@ export async function processQcRun(input) {
     if (run.status !== 'RUNNING')
         return;
     try {
-        const templateVersion = await fetchTemplateVersion(input.tenantId, run.templateVersionId);
-        const rules = templateVersion.ruleSnapshot.map((r) => QcRuleDefinitionSchema.parse(r));
+        // Fetch rules - from version if provided, otherwise from template directly
+        let ruleSnapshot;
+        if (run.templateVersionId) {
+            const templateVersion = await fetchTemplateVersion(input.tenantId, run.templateVersionId);
+            ruleSnapshot = templateVersion.ruleSnapshot;
+        }
+        else {
+            ruleSnapshot = await fetchTemplateRules(input.tenantId, run.templateId);
+        }
+        const rules = ruleSnapshot.map((r) => QcRuleDefinitionSchema.parse(r));
         // Fail fast on invalid upload references.
         const uploadSource = run.inputSource === 'UPLOAD' ? run.inputRef.upload : undefined;
         if (run.inputSource === 'UPLOAD') {
@@ -191,7 +207,7 @@ export async function processQcRun(input) {
                     ruleCounts
                 },
                 integrity: {
-                    templateVersionId: run.templateVersionId,
+                    ...(run.templateVersionId ? { templateVersionId: run.templateVersionId } : { templateId: run.templateId }),
                     templateVersion: run.templateVersion,
                     inputFingerprint: effectiveFingerprint
                 }
@@ -228,7 +244,7 @@ export async function processQcRun(input) {
                     ruleCounts
                 },
                 integrity: {
-                    templateVersionId: run.templateVersionId,
+                    ...(run.templateVersionId ? { templateVersionId: run.templateVersionId } : { templateId: run.templateId }),
                     templateVersion: run.templateVersion,
                     inputFingerprint: effectiveFingerprint
                 },

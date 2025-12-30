@@ -81,6 +81,7 @@ app.get(
   '/v1/templates',
   asyncHandler(async (req, res) => {
     const auth = await requireAuth(req.header('authorization'));
+    requireRole(auth.role, 'Viewer');
 
     const { db } = getAdmin();
     const snap = await db.collection(tenantSubcollectionPath(auth.tenantId, 'qc_templates')).get();
@@ -190,7 +191,7 @@ app.post(
   '/v1/templates',
   asyncHandler(async (req, res) => {
     const auth = await requireAuth(req.header('authorization'));
-    requireRole(auth.role, 'Manager');
+    requireRole(auth.role, 'Admin');
 
     const { db } = getAdmin();
 
@@ -248,7 +249,7 @@ app.put(
   '/v1/templates/:templateId/rules',
   asyncHandler(async (req, res) => {
     const auth = await requireAuth(req.header('authorization'));
-    requireRole(auth.role, 'Manager');
+    requireRole(auth.role, 'Admin');
 
     const templateId = req.params.templateId;
     if (!templateId) throw new ApiError('INVALID_ARGUMENT', 'templateId is required', 400);
@@ -287,7 +288,7 @@ app.patch(
   '/v1/templates/:templateId',
   asyncHandler(async (req, res) => {
     const auth = await requireAuth(req.header('authorization'));
-    requireRole(auth.role, 'Manager');
+    requireRole(auth.role, 'Admin');
 
     const templateId = req.params.templateId;
     if (!templateId) throw new ApiError('INVALID_ARGUMENT', 'templateId is required', 400);
@@ -328,7 +329,7 @@ app.delete(
   '/v1/templates/:templateId',
   asyncHandler(async (req, res) => {
     const auth = await requireAuth(req.header('authorization'));
-    requireRole(auth.role, 'Manager');
+    requireRole(auth.role, 'Admin');
 
     const templateId = req.params.templateId;
     if (!templateId) throw new ApiError('INVALID_ARGUMENT', 'templateId is required', 400);

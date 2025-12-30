@@ -21,21 +21,6 @@ type TemplateResponse = {
     template: Template;
 };
 
-type TemplateVersion = {
-    id: string;
-    version?: number;
-    ruleSnapshot?: unknown[];
-};
-
-type TemplateVersionsListResponse = {
-    versions: TemplateVersion[];
-};
-
-type TemplateVersionCreateResponse = {
-    templateVersionId: string;
-    version: number;
-};
-
 type Severity = 'BLOCKER' | 'MAJOR' | 'MINOR' | 'INFO';
 type RuleType = 'TEXT_REQUIRED_PHRASE' | 'TEXT_REGEX' | 'TEXT_KEYWORD_BLACKLIST' | 'REQUIRED_FIELD';
 
@@ -238,7 +223,7 @@ export default function TemplateRulesPage() {
     const [error, setError] = useState<string | null>(null);
     const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-    const canEdit = useMemo(() => roleAtLeast(claims.role, 'Manager'), [claims.role]);
+    const canEdit = useMemo(() => roleAtLeast(claims.role, 'Admin'), [claims.role]);
 
     async function loadTemplate() {
         if (!user || !templateId) return;
@@ -248,19 +233,7 @@ export default function TemplateRulesPage() {
             const client = await createAuthedClient(user);
             const resp = await client.request<TemplateResponse>(`/v1/templates/${encodeURIComponent(templateId)}`);
             setTemplate(resp.template);
-
-            // Prefer the latest version's snapshot (versioned templates).
-            // Fall back to template.rules for older tenants/data.
-            try {
-                const versionsResp = await client.request<TemplateVersionsListResponse>(
-                    `/v1/templates/${encodeURIComponent(templateId)}/versions`
-                );
-                const latest = (versionsResp.versions ?? [])[0];
-                const snapshot = Array.isArray(latest?.ruleSnapshot) ? latest!.ruleSnapshot! : (resp.template.rules ?? []);
-                setRules(fromRuleSnapshot(Array.isArray(snapshot) ? snapshot : []));
-            } catch {
-                setRules(fromRuleSnapshot(resp.template.rules ?? []));
-            }
+            setRules(fromRuleSnapshot(resp.template.rules ?? []));
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Unknown error');
         } finally {
@@ -275,22 +248,24 @@ export default function TemplateRulesPage() {
         setSuccessMessage(null);
         try {
             const snapshot = toRuleSnapshot(rules);
-            if (snapshot.length === 0) throw new Error('Add at least one rule before saving.');
             // Validate rules client-side
             snapshot.forEach((r) => void QcRuleDefinitionSchema.parse(r));
 
             const client = await createAuthedClient(user);
-            const resp = await client.request<TemplateVersionCreateResponse>(
-                `/v1/templates/${encodeURIComponent(templateId)}/versions`,
-                {
-                    method: 'POST',
-                    body: JSON.stringify({ ruleSnapshot: snapshot })
-                }
-            );
+            await client.request(`/v1/templates/${encodeURIComponent(templateId)}/rules`, {
+                method: 'PUT',
+                body: JSON.stringify({ rules: snapshot })
+            });
 
-            setSuccessMessage(`Saved ${rules.length} rule(s) as version v${resp.version}.`);
+            setSuccessMessage(`Saved ${rules.length} rule(s) successfully.`);
         } catch (err) {
-            setError(err instanceof Error ? err.message : 'Unknown error');
+            if (err instanceof Error && err.message.includes('UNKNOWN: HTTP 404')) {
+                setError(
+                    'API endpoint not found (HTTP 404). Your backend is likely not deployed with PUT /v1/templates/:templateId/rules yet. Redeploy the Functions/Cloud Run API, then try again.'
+                );
+            } else {
+                setError(err instanceof Error ? err.message : 'Unknown error');
+            }
         } finally {
             setSaving(false);
         }

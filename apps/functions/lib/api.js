@@ -63,6 +63,7 @@ app.post('/v1/tenants/bootstrap', asyncHandler(async (req, res) => {
 }));
 app.get('/v1/templates', asyncHandler(async (req, res) => {
     const auth = await requireAuth(req.header('authorization'));
+    requireRole(auth.role, 'Viewer');
     const { db } = getAdmin();
     const snap = await db.collection(tenantSubcollectionPath(auth.tenantId, 'qc_templates')).get();
     res.json({ templates: snap.docs.map((d) => ({ id: d.id, ...d.data() })) });
@@ -146,7 +147,7 @@ app.post('/v1/integrations', asyncHandler(async (req, res) => {
 }));
 app.post('/v1/templates', asyncHandler(async (req, res) => {
     const auth = await requireAuth(req.header('authorization'));
-    requireRole(auth.role, 'Manager');
+    requireRole(auth.role, 'Admin');
     const { db } = getAdmin();
     const bodySchema = z.object({ name: z.string().min(2).max(128), description: z.string().max(2048).optional() });
     const body = bodySchema.parse(req.body);
@@ -157,6 +158,7 @@ app.post('/v1/templates', asyncHandler(async (req, res) => {
         tenantId: auth.tenantId,
         name: body.name,
         description: body.description ?? null,
+        rules: [],
         currentVersion: 0,
         createdAt: Timestamp.now(),
         createdByUid: auth.uid,
@@ -172,9 +174,56 @@ app.post('/v1/templates', asyncHandler(async (req, res) => {
     });
     res.json({ templateId: id });
 }));
+app.get('/v1/templates/:templateId', asyncHandler(async (req, res) => {
+    const auth = await requireAuth(req.header('authorization'));
+    requireRole(auth.role, 'Viewer');
+    const templateId = req.params.templateId;
+    if (!templateId)
+        throw new ApiError('INVALID_ARGUMENT', 'templateId is required', 400);
+    const { db } = getAdmin();
+    const ref = db.doc(tenantSubdocPath(auth.tenantId, 'qc_templates', templateId));
+    const snap = await ref.get();
+    if (!snap.exists)
+        throw new ApiError('NOT_FOUND', 'Template not found', 404);
+    if (snap.get('tenantId') !== auth.tenantId)
+        throw new ApiError('FORBIDDEN', 'Template belongs to another tenant', 403);
+    res.json({ template: { id: snap.id, ...snap.data() } });
+}));
+app.put('/v1/templates/:templateId/rules', asyncHandler(async (req, res) => {
+    const auth = await requireAuth(req.header('authorization'));
+    requireRole(auth.role, 'Admin');
+    const templateId = req.params.templateId;
+    if (!templateId)
+        throw new ApiError('INVALID_ARGUMENT', 'templateId is required', 400);
+    const { db } = getAdmin();
+    const ref = db.doc(tenantSubdocPath(auth.tenantId, 'qc_templates', templateId));
+    const snap = await ref.get();
+    if (!snap.exists)
+        throw new ApiError('NOT_FOUND', 'Template not found', 404);
+    if (snap.get('tenantId') !== auth.tenantId)
+        throw new ApiError('FORBIDDEN', 'Template belongs to another tenant', 403);
+    const bodySchema = z.object({
+        rules: z.array(QcRuleDefinitionSchema)
+    });
+    const body = bodySchema.parse(req.body);
+    await ref.update({
+        rules: body.rules,
+        updatedAt: Timestamp.now()
+    });
+    await writeAuditLog({
+        tenantId: auth.tenantId,
+        actorUid: auth.uid,
+        actorRole: auth.role,
+        action: 'TEMPLATE_UPDATE',
+        resourceType: 'qc_template',
+        resourceId: templateId,
+        meta: { ruleCount: body.rules.length }
+    });
+    res.json({ templateId, ruleCount: body.rules.length });
+}));
 app.patch('/v1/templates/:templateId', asyncHandler(async (req, res) => {
     const auth = await requireAuth(req.header('authorization'));
-    requireRole(auth.role, 'Manager');
+    requireRole(auth.role, 'Admin');
     const templateId = req.params.templateId;
     if (!templateId)
         throw new ApiError('INVALID_ARGUMENT', 'templateId is required', 400);
@@ -209,7 +258,7 @@ app.patch('/v1/templates/:templateId', asyncHandler(async (req, res) => {
 }));
 app.delete('/v1/templates/:templateId', asyncHandler(async (req, res) => {
     const auth = await requireAuth(req.header('authorization'));
-    requireRole(auth.role, 'Manager');
+    requireRole(auth.role, 'Admin');
     const templateId = req.params.templateId;
     if (!templateId)
         throw new ApiError('INVALID_ARGUMENT', 'templateId is required', 400);
@@ -302,7 +351,7 @@ app.post('/v1/qc-runs', asyncHandler(async (req, res) => {
         runId: z.string().uuid().optional(),
         mode: z.enum(['SYNC', 'ASYNC']).default('SYNC'),
         templateId: z.string().min(1),
-        templateVersionId: z.string().min(1),
+        templateVersionId: z.string().min(1).optional(),
         inputSource: z.enum(['INLINE', 'UPLOAD', 'INTEGRATION']),
         input: z.unknown().optional(),
         upload: z
@@ -333,15 +382,18 @@ app.post('/v1/qc-runs', asyncHandler(async (req, res) => {
     const templateName = String(templateSnap.data()?.name ?? '');
     if (!templateName)
         throw new ApiError('FAILED_PRECONDITION', 'Template name missing', 412);
-    // Template version is required; templateVersion number is read from the version doc.
-    const versionSnap = await db.doc(tenantSubdocPath(auth.tenantId, 'qc_template_versions', body.templateVersionId)).get();
-    if (!versionSnap.exists)
-        throw new ApiError('NOT_FOUND', 'Template version not found', 404);
-    const versionData = versionSnap.data();
-    const version = versionData?.version ?? 0;
-    const versionTemplateId = versionData?.templateId;
-    if (versionTemplateId && versionTemplateId !== body.templateId) {
-        throw new ApiError('INVALID_ARGUMENT', 'templateVersionId does not belong to templateId', 400);
+    // Template version is optional; if provided, read from version doc; otherwise use template rules.
+    let version = 0;
+    if (body.templateVersionId) {
+        const versionSnap = await db.doc(tenantSubdocPath(auth.tenantId, 'qc_template_versions', body.templateVersionId)).get();
+        if (!versionSnap.exists)
+            throw new ApiError('NOT_FOUND', 'Template version not found', 404);
+        const versionData = versionSnap.data();
+        version = versionData?.version ?? 0;
+        const versionTemplateId = versionData?.templateId;
+        if (versionTemplateId && versionTemplateId !== body.templateId) {
+            throw new ApiError('INVALID_ARGUMENT', 'templateVersionId does not belong to templateId', 400);
+        }
     }
     const inputRef = body.inputSource === 'INLINE'
         ? { inline: body.input }
@@ -393,7 +445,7 @@ app.post('/v1/qc-runs', asyncHandler(async (req, res) => {
         mode: body.mode,
         templateId: body.templateId,
         templateName,
-        templateVersionId: body.templateVersionId,
+        ...(body.templateVersionId ? { templateVersionId: body.templateVersionId } : {}),
         templateVersion: version,
         inputSource: body.inputSource,
         inputRef: body.inputSource === 'INTEGRATION'
