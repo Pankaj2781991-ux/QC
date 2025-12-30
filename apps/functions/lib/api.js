@@ -464,7 +464,11 @@ app.post('/v1/qc-runs', asyncHandler(async (req, res) => {
         action: 'QC_RUN_CREATE',
         resourceType: 'qc_run',
         resourceId: runId,
-        meta: { mode: body.mode, inputSource: body.inputSource, templateVersionId: body.templateVersionId }
+        meta: {
+            mode: body.mode,
+            inputSource: body.inputSource,
+            ...(body.templateVersionId ? { templateVersionId: body.templateVersionId } : {})
+        }
     });
     if (body.mode === 'SYNC') {
         // Synchronous: process immediately.
