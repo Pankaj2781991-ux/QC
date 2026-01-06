@@ -14,7 +14,8 @@ export const QcRuleTypeSchema = z.enum([
 	'SLA_TIME_DIFFERENCE',
 	// AI-assisted (never final authority; must use threshold logic)
 	'TONE_CLASSIFICATION',
-	'IMPLIED_ABUSE_DETECTION'
+	'IMPLIED_ABUSE_DETECTION',
+	'CUSTOM_TEXT_CHECK'
 ]);
 export type QcRuleType = z.infer<typeof QcRuleTypeSchema>;
 
@@ -97,6 +98,7 @@ const RuleBaseSchema = z.object({
 
 export const TextRegexParamsSchema = z.object({
 	fieldPath: z.array(z.string()).optional(),
+	speaker: z.enum(['ANY', 'OPERATOR', 'CUSTOMER']).default('ANY'),
 	pattern: z.string().min(1),
 	flags: z.string().optional(),
 	mustMatch: z.boolean().default(true)
@@ -105,6 +107,7 @@ export type TextRegexParams = z.infer<typeof TextRegexParamsSchema>;
 
 export const TextKeywordBlacklistParamsSchema = z.object({
 	fieldPath: z.array(z.string()).optional(),
+	speaker: z.enum(['ANY', 'OPERATOR', 'CUSTOMER']).default('ANY'),
 	keywords: z.array(z.string().min(1)).min(1),
 	caseSensitive: z.boolean().default(false)
 });
@@ -112,10 +115,43 @@ export type TextKeywordBlacklistParams = z.infer<typeof TextKeywordBlacklistPara
 
 export const TextRequiredPhraseParamsSchema = z.object({
 	fieldPath: z.array(z.string()).optional(),
+	speaker: z.enum(['ANY', 'OPERATOR', 'CUSTOMER']).default('ANY'),
 	phrase: z.string().min(1),
-	caseSensitive: z.boolean().default(false)
+	caseSensitive: z.boolean().default(false),
+	withinFirstChars: z.number().int().positive().optional(),
+	withinLastChars: z.number().int().positive().optional()
+}).refine((v) => !(v.withinFirstChars !== undefined && v.withinLastChars !== undefined), {
+	message: 'withinFirstChars and withinLastChars cannot both be set'
 });
 export type TextRequiredPhraseParams = z.infer<typeof TextRequiredPhraseParamsSchema>;
+
+export const CustomTextCheckModeSchema = z.enum(['CONTAINS', 'NOT_CONTAINS', 'REGEX']);
+export type CustomTextCheckMode = z.infer<typeof CustomTextCheckModeSchema>;
+
+export const CustomTextCheckParamsSchema = z
+	.object({
+		fieldPath: z.array(z.string()).optional(),
+		mode: CustomTextCheckModeSchema,
+		// Back-compat: single value.
+		value: z.string().min(1).optional(),
+		// Preferred: multiple values.
+		values: z.array(z.string().min(1)).min(1).optional(),
+		// For CONTAINS mode when using multiple values.
+		requireAll: z.boolean().default(false),
+		// For REGEX mode.
+		flags: z.string().optional(),
+		// For CONTAINS / NOT_CONTAINS.
+		caseSensitive: z.boolean().default(false),
+		withinFirstChars: z.number().int().positive().optional(),
+		withinLastChars: z.number().int().positive().optional()
+	})
+	.refine((v) => (v.value !== undefined && v.value.trim().length > 0) || (v.values !== undefined && v.values.length > 0), {
+		message: 'Either value or values is required'
+	})
+	.refine((v) => !(v.withinFirstChars !== undefined && v.withinLastChars !== undefined), {
+		message: 'withinFirstChars and withinLastChars cannot both be set'
+	});
+export type CustomTextCheckParams = z.infer<typeof CustomTextCheckParamsSchema>;
 
 export const NumericRangeParamsSchema = z.object({
 	fieldPath: z.array(z.string()).min(1),
@@ -175,6 +211,7 @@ export const QcRuleDefinitionSchema = z.discriminatedUnion('type', [
 		params: TextKeywordBlacklistParamsSchema
 	}),
 	RuleBaseSchema.extend({ type: z.literal('TEXT_REQUIRED_PHRASE'), params: TextRequiredPhraseParamsSchema }),
+	RuleBaseSchema.extend({ type: z.literal('CUSTOM_TEXT_CHECK'), params: CustomTextCheckParamsSchema }),
 	RuleBaseSchema.extend({ type: z.literal('NUMERIC_RANGE'), params: NumericRangeParamsSchema }),
 	RuleBaseSchema.extend({ type: z.literal('REQUIRED_FIELD'), params: RequiredFieldParamsSchema }),
 	RuleBaseSchema.extend({ type: z.literal('EXCEL_ALL_CAPS'), params: ExcelAllCapsParamsSchema }),

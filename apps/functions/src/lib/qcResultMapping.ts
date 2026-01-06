@@ -88,12 +88,16 @@ function firstReasonFromEvidence(evidence: Evidence[]): string | undefined {
   return e?.message;
 }
 
-function evidenceToRefs(evidence: Evidence[], options?: { storagePath?: string; fileName?: string; contentType?: string }): EvidenceRef[] {
+function evidenceToRefs(
+  evidence: Evidence[],
+  options?: { storagePath?: string; fileName?: string; contentType?: string; contextPrefix?: string }
+): EvidenceRef[] {
+  const prefix = typeof options?.contextPrefix === 'string' && options.contextPrefix.length > 0 ? options.contextPrefix : '';
   return (evidence ?? []).map((e) => {
     const ref: EvidenceRef = {
       kind: 'GENERIC',
       title: e.type,
-      detail: e.message,
+      detail: prefix && e.message ? `${prefix}${e.message}` : e.message,
       ...(options?.storagePath || options?.fileName || options?.contentType
         ? {
             source: {
@@ -123,6 +127,7 @@ export function mapRuleResultToDoc(input: {
   rule: QcRuleDefinition;
   result: QcRuleResult;
   source?: { storagePath?: string; fileName?: string; contentType?: string };
+  contextPrefix?: string;
 }): RuleResultDoc {
   const status = ruleOutcomeToStatus(input.result.outcome);
   const base: RuleResultDoc = {
@@ -134,7 +139,10 @@ export function mapRuleResultToDoc(input: {
     severity: input.result.severity,
     status,
     score: input.result.score,
-    evidence: evidenceToRefs(input.result.evidence ?? [], input.source)
+    evidence: evidenceToRefs(input.result.evidence ?? [], {
+      ...(input.source ?? {}),
+      ...(input.contextPrefix ? { contextPrefix: input.contextPrefix } : {})
+    })
   };
 
   const reason = status === 'FAIL' || status === 'NOT_EVALUATED' ? firstReasonFromEvidence(input.result.evidence ?? []) : undefined;

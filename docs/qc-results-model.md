@@ -93,6 +93,33 @@ Stored as a subcollection to avoid Firestore 1MB document limits.
   - `evidence: EvidenceRef[]`
   - `error?: QcPublicError` (only when `status === 'ERROR'`)
 
+## Per-chat breakdown (optional)
+
+When an uploaded transcript contains multiple chats, a single QC run may be executed as **multiple chat evaluations** under the same run.
+
+In this case, the parent result document may include:
+
+- `chat:`
+  - `enabled: boolean`
+  - `strategy: 'CHAT_ID' | 'SEPARATORS' | 'SPEAKER_BLOCKS' | 'SINGLE'`
+  - `chatCount: number`
+  - `warning?: string` (present when splitting fell back or was best-effort)
+
+Chat-level results are stored as an additional subcollection:
+
+- `tenants/{tenantId}/qc_run_results/{resultId}/chat_results/{chatResultId}`
+  - `chatResultId: string`
+  - `index: number` (0-based)
+  - `title: string`
+  - `chatId?: string`
+  - `participants?: { operator?: string, customer?: string }`
+  - `summary: { overallOutcome, overallScore, failedRuleIds, ruleCounts }`
+
+Each chat result can also have its own rule results subcollection:
+
+- `tenants/{tenantId}/qc_run_results/{resultId}/chat_results/{chatResultId}/rule_results/{ruleResultId}`
+  - Same shape as the run-level rule results documents
+
 ## Evidence model
 
 ### EvidenceRef

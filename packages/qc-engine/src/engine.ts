@@ -21,6 +21,43 @@ function normalizeCase(text: string, caseSensitive: boolean): string {
   return caseSensitive ? text : text.toLowerCase();
 }
 
+type SpeakerFilter = 'OPERATOR' | 'CUSTOMER';
+
+function extractSpeakerText(fullText: string, speaker: SpeakerFilter): string {
+  const lines = fullText.split(/\r?\n/);
+  let current: SpeakerFilter | null = null;
+  const chunks: string[] = [];
+  let sawAnyLabels = false;
+
+  const labelRegex = /^\s*(operator|agent|customer|client)\s*:\s*(.*)$/i;
+
+  for (const rawLine of lines) {
+    const m = labelRegex.exec(rawLine);
+    if (m) {
+      sawAnyLabels = true;
+      const who = (m[1] ?? '').toLowerCase();
+      current = who === 'operator' || who === 'agent' ? 'OPERATOR' : 'CUSTOMER';
+
+      const inline = (m[2] ?? '').trim();
+      if (inline && current === speaker) chunks.push(inline);
+      continue;
+    }
+
+    if (!current) continue;
+    if (current !== speaker) continue;
+
+    const trimmed = rawLine.trimEnd();
+    if (!trimmed) continue;
+    chunks.push(trimmed);
+  }
+
+  // If the transcript isn't labeled, fall back to the full text (so existing behavior doesn't break).
+  if (!sawAnyLabels) return fullText;
+
+  // If it is labeled but we didn't capture anything for that speaker, return empty string.
+  return chunks.join('\n');
+}
+
 function resultBase(rule: QcRuleDefinition): Omit<QcRuleResult, 'outcome' | 'score' | 'evidence' | 'error'> {
   return {
     ruleId: rule.ruleId,
@@ -84,15 +121,18 @@ function evalTextRegex(rule: Extract<QcRuleDefinition, { type: 'TEXT_REGEX' }>, 
   const text = asTextFromInput(input, rule.params.fieldPath);
   if (text === undefined) return skip(rule, 'No text available for evaluation');
 
+  const speaker = (rule.params as any)?.speaker ?? 'ANY';
+  const scopedText = speaker === 'ANY' ? text : extractSpeakerText(text, speaker);
+
   const flags = rule.params.flags ?? '';
   const regex = new RegExp(rule.params.pattern, flags);
-  const matched = regex.test(text);
+  const matched = regex.test(scopedText);
 
   const evidence: Evidence[] = [
     {
       type: 'TEXT_REGEX',
       message: matched ? 'Regex matched' : 'Regex did not match',
-      meta: { pattern: rule.params.pattern, flags }
+      meta: { pattern: rule.params.pattern, flags, speaker }
     }
   ];
 
@@ -107,7 +147,10 @@ function evalTextKeywordBlacklist(
   const text = asTextFromInput(input, rule.params.fieldPath);
   if (text === undefined) return skip(rule, 'No text available for evaluation');
 
-  const haystack = normalizeCase(text, rule.params.caseSensitive);
+  const speaker = (rule.params as any)?.speaker ?? 'ANY';
+  const scopedText = speaker === 'ANY' ? text : extractSpeakerText(text, speaker);
+
+  const haystack = normalizeCase(scopedText, rule.params.caseSensitive);
   const found: string[] = [];
 
   for (const keyword of rule.params.keywords) {
@@ -123,7 +166,7 @@ function evalTextKeywordBlacklist(
     {
       type: 'TEXT_KEYWORD_BLACKLIST',
       message: 'Blacklisted keywords detected',
-      meta: { found }
+      meta: { found, speaker }
     }
   ]);
 }
@@ -135,13 +178,132 @@ function evalTextRequiredPhrase(
   const text = asTextFromInput(input, rule.params.fieldPath);
   if (text === undefined) return skip(rule, 'No text available for evaluation');
 
-  const haystack = normalizeCase(text, rule.params.caseSensitive);
+  const speaker = (rule.params as any)?.speaker ?? 'ANY';
+  const scopedText = speaker === 'ANY' ? text : extractSpeakerText(text, speaker);
+
+  let segment = scopedText;
+  if (rule.params.withinFirstChars !== undefined) {
+    segment = segment.slice(0, Math.max(0, rule.params.withinFirstChars));
+  } else if (rule.params.withinLastChars !== undefined) {
+    const n = Math.max(0, rule.params.withinLastChars);
+    segment = segment.slice(Math.max(0, segment.length - n));
+  }
+
+  const haystack = normalizeCase(segment, rule.params.caseSensitive);
   const needle = normalizeCase(rule.params.phrase, rule.params.caseSensitive);
   const ok = needle.length > 0 && haystack.includes(needle);
 
   return ok
-    ? pass(rule, [{ type: 'TEXT_REQUIRED_PHRASE', message: 'Required phrase present' }])
-    : fail(rule, [{ type: 'TEXT_REQUIRED_PHRASE', message: 'Required phrase missing', meta: { phrase: rule.params.phrase } }]);
+    ? pass(rule, [
+        {
+          type: 'TEXT_REQUIRED_PHRASE',
+          message: 'Required phrase present',
+          meta: {
+            speaker,
+            ...(rule.params.withinFirstChars !== undefined ? { withinFirstChars: rule.params.withinFirstChars } : {}),
+            ...(rule.params.withinLastChars !== undefined ? { withinLastChars: rule.params.withinLastChars } : {})
+          }
+        }
+      ])
+    : fail(rule, [
+        {
+          type: 'TEXT_REQUIRED_PHRASE',
+          message: 'Required phrase missing',
+          meta: {
+            phrase: rule.params.phrase,
+            speaker,
+            ...(rule.params.withinFirstChars !== undefined ? { withinFirstChars: rule.params.withinFirstChars } : {}),
+            ...(rule.params.withinLastChars !== undefined ? { withinLastChars: rule.params.withinLastChars } : {})
+          }
+        }
+      ]);
+}
+
+function evalCustomTextCheck(
+  rule: Extract<QcRuleDefinition, { type: 'CUSTOM_TEXT_CHECK' }>,
+  input: QcNormalizedInput
+): QcRuleResult {
+  const text = asTextFromInput(input, rule.params.fieldPath);
+  if (text === undefined) return skip(rule, 'No text available for evaluation');
+
+  let segment = text;
+  if (rule.params.withinFirstChars !== undefined) {
+    segment = segment.slice(0, Math.max(0, rule.params.withinFirstChars));
+  } else if (rule.params.withinLastChars !== undefined) {
+    const n = Math.max(0, rule.params.withinLastChars);
+    segment = segment.slice(Math.max(0, segment.length - n));
+  }
+
+  const windowMeta = {
+    ...(rule.params.withinFirstChars !== undefined ? { withinFirstChars: rule.params.withinFirstChars } : {}),
+    ...(rule.params.withinLastChars !== undefined ? { withinLastChars: rule.params.withinLastChars } : {})
+  };
+
+  if (rule.params.mode === 'REGEX') {
+    const flags = rule.params.flags ?? '';
+    const pattern = rule.params.value ?? rule.params.values?.[0] ?? '';
+    const regex = new RegExp(pattern, flags);
+    const matched = regex.test(segment);
+
+    const evidence: Evidence[] = [
+      {
+        type: 'CUSTOM_TEXT_CHECK',
+        message: matched ? 'Regex matched' : 'Regex did not match',
+        meta: { mode: rule.params.mode, value: pattern, flags, ...windowMeta }
+      }
+    ];
+
+    return matched ? pass(rule, evidence) : fail(rule, evidence);
+  }
+
+  const haystack = normalizeCase(segment, rule.params.caseSensitive);
+  const values = (rule.params.values && rule.params.values.length ? rule.params.values : rule.params.value ? [rule.params.value] : [])
+    .map((v) => v.trim())
+    .filter(Boolean);
+
+  const needles = values.map((v) => normalizeCase(v, rule.params.caseSensitive));
+  const foundList: string[] = [];
+  for (const [idx, needle] of needles.entries()) {
+    if (needle.length > 0 && haystack.includes(needle)) foundList.push(values[idx] ?? needle);
+  }
+
+  let ok = false;
+  if (rule.params.mode === 'CONTAINS') {
+    ok = rule.params.requireAll ? foundList.length === values.length : foundList.length > 0;
+  } else {
+    // NOT_CONTAINS: must find none
+    ok = foundList.length === 0;
+  }
+
+  return ok
+    ? pass(rule, [
+        {
+          type: 'CUSTOM_TEXT_CHECK',
+          message: 'Custom text check passed',
+          meta: {
+            mode: rule.params.mode,
+            values,
+            requireAll: rule.params.requireAll,
+            caseSensitive: rule.params.caseSensitive,
+            found: foundList,
+            ...windowMeta
+          }
+        }
+      ])
+    : fail(rule, [
+        {
+          type: 'CUSTOM_TEXT_CHECK',
+          message: 'Custom text check failed',
+          meta: {
+            mode: rule.params.mode,
+            values,
+            requireAll: rule.params.requireAll,
+            caseSensitive: rule.params.caseSensitive,
+            found: foundList,
+            ...windowMeta
+          }
+        }
+      ]);
 }
 
 function evalNumericRange(rule: Extract<QcRuleDefinition, { type: 'NUMERIC_RANGE' }>, input: QcNormalizedInput): QcRuleResult {
@@ -371,6 +533,8 @@ function evaluateRule(ctx: QcExecutionContext, rule: QcRuleDefinition): QcRuleRe
         return evalTextKeywordBlacklist(rule, ctx.input);
       case 'TEXT_REQUIRED_PHRASE':
         return evalTextRequiredPhrase(rule, ctx.input);
+      case 'CUSTOM_TEXT_CHECK':
+        return evalCustomTextCheck(rule, ctx.input);
       case 'NUMERIC_RANGE':
         return evalNumericRange(rule, ctx.input);
       case 'REQUIRED_FIELD':

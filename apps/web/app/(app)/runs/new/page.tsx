@@ -19,6 +19,18 @@ type TemplatesListResponse = {
   templates: Template[];
 };
 
+type Integration = {
+  id: string;
+  type?: string;
+  authType?: 'API_KEY' | 'OAUTH';
+  config?: Record<string, unknown>;
+  updatedAt?: unknown;
+};
+
+type IntegrationsListResponse = {
+  integrations: Integration[];
+};
+
 type CreateRunResponse = {
   runId: string;
 };
@@ -47,6 +59,13 @@ export default function RunNewPage() {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
   const [file, setFile] = useState<File | null>(null);
 
+  const [inputSource, setInputSource] = useState<'UPLOAD' | 'INTEGRATION'>('UPLOAD');
+
+  const [integrations, setIntegrations] = useState<Integration[]>([]);
+  const [integrationsError, setIntegrationsError] = useState<string | null>(null);
+  const [selectedIntegrationId, setSelectedIntegrationId] = useState<string>('');
+  const [integrationQueryText, setIntegrationQueryText] = useState<string>('');
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -68,6 +87,20 @@ export default function RunNewPage() {
     const client = await createAuthedClient(user);
     const resp = await client.request<TemplatesListResponse>('/v1/templates');
     setTemplates(resp.templates ?? []);
+  }
+
+  async function loadIntegrations() {
+    if (!user) return;
+    setIntegrationsError(null);
+    try {
+      const client = await createAuthedClient(user);
+      const resp = await client.request<IntegrationsListResponse>('/v1/integrations');
+      setIntegrations(resp.integrations ?? []);
+    } catch (e) {
+      // Integrations are role-gated (Manager+). Keep upload flow working even if this fails.
+      setIntegrations([]);
+      setIntegrationsError(e instanceof Error ? e.message : 'Unable to load integrations');
+    }
   }
 
   async function pollOnce(id: string) {
@@ -93,6 +126,7 @@ export default function RunNewPage() {
   useEffect(() => {
     if (!loading && canRun) {
       void loadTemplates().catch((e) => setError(e instanceof Error ? e.message : 'Unknown error'));
+      void loadIntegrations();
     }
 
     return () => {
@@ -117,7 +151,7 @@ export default function RunNewPage() {
     <div className="flex flex-col gap-6">
       <div>
         <h1 className="text-2xl font-semibold text-zinc-950">Run QC</h1>
-        <p className="mt-1 text-sm text-zinc-600">Select a template and upload a file to run QC checks.</p>
+        <p className="mt-1 text-sm text-zinc-600">Select a template and provide input (upload or integration) to run QC checks.</p>
       </div>
 
       {error ? <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div> : null}
@@ -134,16 +168,73 @@ export default function RunNewPage() {
             try {
               if (!selectedTemplateId) throw new Error('Select a template');
               if (!hasRules) throw new Error('Selected template has no rules. Add rules first.');
-              if (!file) throw new Error('Select a file');
+
+              if (inputSource === 'UPLOAD') {
+                if (!file) throw new Error('Select a file');
+              }
+
+              if (inputSource === 'INTEGRATION') {
+                if (!selectedIntegrationId) throw new Error('Select an integration');
+                if (integrationsError) {
+                  throw new Error(
+                    `Integrations are unavailable for your account (${integrationsError}). Ask a Manager/Admin to create integrations or grant access.`
+                  );
+                }
+              }
 
               const newRunId = crypto.randomUUID();
               setRunId(newRunId);
               setRunStatus('QUEUED');
 
-              const storagePath = `tenants/${claims.tenantId}/uploads/${newRunId}/${file.name}`;
-              const storage = getFirebaseStorage();
-              const r = storageRef(storage, storagePath);
-              await uploadBytes(r, file, file.type ? { contentType: file.type } : undefined);
+              let uploadPayload:
+                | {
+                    storagePath: string;
+                    fileName: string;
+                    contentType?: string;
+                  }
+                | undefined;
+
+              let integrationPayload:
+                | {
+                    integrationId: string;
+                    query?: Record<string, unknown>;
+                  }
+                | undefined;
+
+              if (inputSource === 'UPLOAD') {
+                const storagePath = `tenants/${claims.tenantId}/uploads/${newRunId}/${file!.name}`;
+                const storage = getFirebaseStorage();
+                const r = storageRef(storage, storagePath);
+                await uploadBytes(r, file!, file!.type ? { contentType: file!.type } : undefined);
+
+                uploadPayload = {
+                  storagePath,
+                  fileName: file!.name,
+                  ...(file!.type ? { contentType: file!.type } : {})
+                };
+              }
+
+              if (inputSource === 'INTEGRATION') {
+                let query: Record<string, unknown> | undefined;
+                const trimmed = integrationQueryText.trim();
+                if (trimmed) {
+                  let parsed: unknown;
+                  try {
+                    parsed = JSON.parse(trimmed);
+                  } catch {
+                    throw new Error('Integration query must be valid JSON (an object like {"id":"123"}).');
+                  }
+                  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                    throw new Error('Integration query must be a JSON object (e.g. {"id":"123"}).');
+                  }
+                  query = parsed as Record<string, unknown>;
+                }
+
+                integrationPayload = {
+                  integrationId: selectedIntegrationId,
+                  ...(query ? { query } : {})
+                };
+              }
 
               const client = await createAuthedClient(user);
               await client.request<CreateRunResponse>('/v1/qc-runs', {
@@ -152,12 +243,9 @@ export default function RunNewPage() {
                   runId: newRunId,
                   mode: 'SYNC',
                   templateId: selectedTemplateId,
-                  inputSource: 'UPLOAD',
-                  upload: {
-                    storagePath,
-                    fileName: file.name,
-                    ...(file.type ? { contentType: file.type } : {})
-                  }
+                  inputSource,
+                  ...(inputSource === 'UPLOAD' ? { upload: uploadPayload } : {}),
+                  ...(inputSource === 'INTEGRATION' ? { integration: integrationPayload } : {})
                 })
               });
 
@@ -177,6 +265,36 @@ export default function RunNewPage() {
             }
           }}
         >
+          <div className="flex flex-col gap-2">
+            <div className="text-sm text-zinc-700">Input source</div>
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="flex items-center gap-2 text-sm text-zinc-700">
+                <input
+                  type="radio"
+                  name="inputSource"
+                  checked={inputSource === 'UPLOAD'}
+                  onChange={() => setInputSource('UPLOAD')}
+                />
+                Upload
+              </label>
+              <label className="flex items-center gap-2 text-sm text-zinc-700">
+                <input
+                  type="radio"
+                  name="inputSource"
+                  checked={inputSource === 'INTEGRATION'}
+                  onChange={() => setInputSource('INTEGRATION')}
+                />
+                Integration
+              </label>
+            </div>
+
+            {inputSource === 'INTEGRATION' ? (
+              <div className="text-xs text-zinc-500">
+                Uses a saved integration to fetch data from an external tool.
+              </div>
+            ) : null}
+          </div>
+
           <label className="flex flex-col gap-1">
             <span className="text-sm text-zinc-700">Template</span>
             <select
@@ -206,20 +324,82 @@ export default function RunNewPage() {
             </div>
           ) : null}
 
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-zinc-700">Upload file</span>
-            <input
-              className="rounded border px-3 py-2"
-              type="file"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-              required
-            />
-          </label>
+          {inputSource === 'UPLOAD' ? (
+            <label className="flex flex-col gap-1">
+              <span className="text-sm text-zinc-700">Upload file</span>
+              <input
+                className="rounded border px-3 py-2"
+                type="file"
+                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                required
+              />
+            </label>
+          ) : null}
+
+          {inputSource === 'INTEGRATION' ? (
+            <div className="flex flex-col gap-3 rounded border bg-zinc-50 p-3">
+              {integrationsError ? (
+                <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  Cannot load integrations: {integrationsError}
+                </div>
+              ) : null}
+
+              <label className="flex flex-col gap-1">
+                <span className="text-sm text-zinc-700">Integration</span>
+                <select
+                  className="rounded border px-3 py-2"
+                  value={selectedIntegrationId}
+                  onChange={(e) => setSelectedIntegrationId(e.target.value)}
+                  required
+                  disabled={Boolean(integrationsError)}
+                >
+                  <option value="" disabled>
+                    Select…
+                  </option>
+                  {integrations.map((i) => (
+                    <option key={i.id} value={i.id}>
+                      {i.type ?? 'Integration'} ({i.id})
+                    </option>
+                  ))}
+                </select>
+                <div className="text-xs text-zinc-500">
+                  Manage integrations on the Integrations page.
+                </div>
+              </label>
+
+              <label className="flex flex-col gap-1">
+                <span className="text-sm text-zinc-700">Query (optional)</span>
+                <textarea
+                  className="min-h-20 rounded border px-3 py-2 font-mono text-xs"
+                  value={integrationQueryText}
+                  onChange={(e) => setIntegrationQueryText(e.target.value)}
+                  placeholder='{"id":"123"}'
+                />
+                <div className="text-xs text-zinc-500">
+                  JSON object. Keys become URL query parameters for the integration request.
+                </div>
+              </label>
+
+              <button
+                className="w-fit rounded border bg-white px-3 py-2 text-sm hover:bg-zinc-50 disabled:opacity-60"
+                type="button"
+                onClick={() => void loadIntegrations()}
+                disabled={busy}
+              >
+                Refresh integrations
+              </button>
+            </div>
+          ) : null}
 
           <div className="flex items-center gap-3">
             <button
               className="w-fit rounded bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
-              disabled={busy || !hasRules}
+              disabled={
+                busy ||
+                !hasRules ||
+                (inputSource === 'UPLOAD' ? !file : false) ||
+                (inputSource === 'INTEGRATION' ? !selectedIntegrationId || Boolean(integrationsError) : false)
+              }
               type="submit"
             >
               {busy ? 'Working…' : 'Start run'}

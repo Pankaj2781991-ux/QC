@@ -22,7 +22,8 @@ type TemplateResponse = {
 };
 
 type Severity = 'BLOCKER' | 'MAJOR' | 'MINOR' | 'INFO';
-type RuleType = 'TEXT_REQUIRED_PHRASE' | 'TEXT_REGEX' | 'TEXT_KEYWORD_BLACKLIST' | 'REQUIRED_FIELD';
+type RuleType = 'TEXT_REQUIRED_PHRASE' | 'TEXT_REGEX' | 'TEXT_KEYWORD_BLACKLIST' | 'REQUIRED_FIELD' | 'CUSTOM_TEXT_CHECK';
+type Speaker = 'ANY' | 'OPERATOR' | 'CUSTOMER';
 
 type RuleBuilder =
     | {
@@ -32,8 +33,27 @@ type RuleBuilder =
         severity: Severity;
         applyTo: 'WHOLE_DOCUMENT' | 'FIELD';
         fieldPathText: string;
+        speaker: Speaker;
         phrase: string;
         caseSensitive: boolean;
+        withinFirstCharsText: string;
+        withinLastCharsText: string;
+        enabled: boolean;
+    }
+    | {
+        uiId: string;
+        type: 'CUSTOM_TEXT_CHECK';
+        name: string;
+        severity: Severity;
+        applyTo: 'WHOLE_DOCUMENT' | 'FIELD';
+        fieldPathText: string;
+        mode: 'CONTAINS' | 'NOT_CONTAINS' | 'REGEX';
+        valuesText: string;
+        requireAll: boolean;
+        flags: string;
+        caseSensitive: boolean;
+        withinFirstCharsText: string;
+        withinLastCharsText: string;
         enabled: boolean;
     }
     | {
@@ -43,6 +63,7 @@ type RuleBuilder =
         severity: Severity;
         applyTo: 'WHOLE_DOCUMENT' | 'FIELD';
         fieldPathText: string;
+        speaker: Speaker;
         pattern: string;
         flags: string;
         mustMatch: boolean;
@@ -55,6 +76,7 @@ type RuleBuilder =
         severity: Severity;
         applyTo: 'WHOLE_DOCUMENT' | 'FIELD';
         fieldPathText: string;
+        speaker: Speaker;
         keywordsText: string;
         caseSensitive: boolean;
         enabled: boolean;
@@ -108,14 +130,64 @@ function toRuleSnapshot(builderRules: RuleBuilder[]): unknown[] {
             };
         }
 
-        const fieldPath = r.applyTo === 'FIELD' ? parseFieldPath(r.fieldPathText) : undefined;
-        if (r.type === 'TEXT_REQUIRED_PHRASE') {
+        if (r.type === 'CUSTOM_TEXT_CHECK') {
+            const fieldPath = r.applyTo === 'FIELD' ? parseFieldPath(r.fieldPathText) : undefined;
+
+            const withinFirstChars = r.withinFirstCharsText.trim() ? Number(r.withinFirstCharsText.trim()) : undefined;
+            const withinLastChars = r.withinLastCharsText.trim() ? Number(r.withinLastCharsText.trim()) : undefined;
+
+            if (withinFirstChars !== undefined && (!Number.isFinite(withinFirstChars) || withinFirstChars <= 0)) {
+                throw new Error('Within first chars must be a positive number');
+            }
+            if (withinLastChars !== undefined && (!Number.isFinite(withinLastChars) || withinLastChars <= 0)) {
+                throw new Error('Within last chars must be a positive number');
+            }
+            if (withinFirstChars !== undefined && withinLastChars !== undefined) {
+                throw new Error('Set only one of: within first chars OR within last chars');
+            }
+
             return {
                 ...base,
                 params: {
                     ...(fieldPath ? { fieldPath } : {}),
+                    mode: r.mode,
+                    values: r.valuesText
+                        .split(',')
+                        .map((v) => v.trim())
+                        .filter(Boolean),
+                    requireAll: r.requireAll,
+                    ...(r.mode === 'REGEX' && r.flags.trim() ? { flags: r.flags.trim() } : {}),
+                    caseSensitive: r.caseSensitive,
+                    ...(withinFirstChars !== undefined ? { withinFirstChars: Math.trunc(withinFirstChars) } : {}),
+                    ...(withinLastChars !== undefined ? { withinLastChars: Math.trunc(withinLastChars) } : {})
+                }
+            };
+        }
+
+        const fieldPath = r.applyTo === 'FIELD' ? parseFieldPath(r.fieldPathText) : undefined;
+        if (r.type === 'TEXT_REQUIRED_PHRASE') {
+            const withinFirstChars = r.withinFirstCharsText.trim() ? Number(r.withinFirstCharsText.trim()) : undefined;
+            const withinLastChars = r.withinLastCharsText.trim() ? Number(r.withinLastCharsText.trim()) : undefined;
+
+            if (withinFirstChars !== undefined && (!Number.isFinite(withinFirstChars) || withinFirstChars <= 0)) {
+                throw new Error('Within first chars must be a positive number');
+            }
+            if (withinLastChars !== undefined && (!Number.isFinite(withinLastChars) || withinLastChars <= 0)) {
+                throw new Error('Within last chars must be a positive number');
+            }
+            if (withinFirstChars !== undefined && withinLastChars !== undefined) {
+                throw new Error('Set only one of: within first chars OR within last chars');
+            }
+
+            return {
+                ...base,
+                params: {
+                    ...(fieldPath ? { fieldPath } : {}),
+                    ...(r.speaker && r.speaker !== 'ANY' ? { speaker: r.speaker } : {}),
                     phrase: r.phrase,
-                    caseSensitive: r.caseSensitive
+                    caseSensitive: r.caseSensitive,
+                    ...(withinFirstChars !== undefined ? { withinFirstChars: Math.trunc(withinFirstChars) } : {}),
+                    ...(withinLastChars !== undefined ? { withinLastChars: Math.trunc(withinLastChars) } : {})
                 }
             };
         }
@@ -125,6 +197,7 @@ function toRuleSnapshot(builderRules: RuleBuilder[]): unknown[] {
                 ...base,
                 params: {
                     ...(fieldPath ? { fieldPath } : {}),
+                    ...(r.speaker && r.speaker !== 'ANY' ? { speaker: r.speaker } : {}),
                     pattern: r.pattern,
                     flags: r.flags?.trim() ? r.flags.trim() : undefined,
                     mustMatch: r.mustMatch
@@ -138,6 +211,7 @@ function toRuleSnapshot(builderRules: RuleBuilder[]): unknown[] {
             ...base,
             params: {
                 ...(fieldPath ? { fieldPath } : {}),
+                ...(r.speaker && r.speaker !== 'ANY' ? { speaker: r.speaker } : {}),
                 keywords,
                 caseSensitive: r.caseSensitive
             }
@@ -161,8 +235,31 @@ function fromRuleSnapshot(snapshot: unknown[]): RuleBuilder[] {
                 type: 'TEXT_REQUIRED_PHRASE' as const,
                 applyTo: r.params?.fieldPath?.length ? ('FIELD' as const) : ('WHOLE_DOCUMENT' as const),
                 fieldPathText: r.params?.fieldPath?.join('.') ?? '',
+                speaker: (r.params?.speaker as Speaker) ?? 'ANY',
                 phrase: r.params?.phrase ?? '',
-                caseSensitive: r.params?.caseSensitive ?? false
+                caseSensitive: r.params?.caseSensitive ?? false,
+                withinFirstCharsText: r.params?.withinFirstChars ? String(r.params.withinFirstChars) : '',
+                withinLastCharsText: r.params?.withinLastChars ? String(r.params.withinLastChars) : ''
+            };
+        }
+
+        if (r.type === 'CUSTOM_TEXT_CHECK') {
+            return {
+                ...base,
+                type: 'CUSTOM_TEXT_CHECK' as const,
+                applyTo: r.params?.fieldPath?.length ? ('FIELD' as const) : ('WHOLE_DOCUMENT' as const),
+                fieldPathText: r.params?.fieldPath?.join('.') ?? '',
+                mode: r.params?.mode ?? 'CONTAINS',
+                valuesText: Array.isArray(r.params?.values)
+                    ? r.params.values.join(', ')
+                    : typeof r.params?.value === 'string'
+                        ? r.params.value
+                        : '',
+                requireAll: Boolean(r.params?.requireAll ?? false),
+                flags: r.params?.flags ?? 'i',
+                caseSensitive: r.params?.caseSensitive ?? false,
+                withinFirstCharsText: r.params?.withinFirstChars ? String(r.params.withinFirstChars) : '',
+                withinLastCharsText: r.params?.withinLastChars ? String(r.params.withinLastChars) : '',
             };
         }
 
@@ -172,6 +269,7 @@ function fromRuleSnapshot(snapshot: unknown[]): RuleBuilder[] {
                 type: 'TEXT_REGEX' as const,
                 applyTo: r.params?.fieldPath?.length ? ('FIELD' as const) : ('WHOLE_DOCUMENT' as const),
                 fieldPathText: r.params?.fieldPath?.join('.') ?? '',
+                speaker: (r.params?.speaker as Speaker) ?? 'ANY',
                 pattern: r.params?.pattern ?? '',
                 flags: r.params?.flags ?? '',
                 mustMatch: r.params?.mustMatch ?? true
@@ -184,6 +282,7 @@ function fromRuleSnapshot(snapshot: unknown[]): RuleBuilder[] {
                 type: 'TEXT_KEYWORD_BLACKLIST' as const,
                 applyTo: r.params?.fieldPath?.length ? ('FIELD' as const) : ('WHOLE_DOCUMENT' as const),
                 fieldPathText: r.params?.fieldPath?.join('.') ?? '',
+                speaker: (r.params?.speaker as Speaker) ?? 'ANY',
                 keywordsText: (r.params?.keywords ?? []).join(', '),
                 caseSensitive: r.params?.caseSensitive ?? false
             };
@@ -204,8 +303,11 @@ function fromRuleSnapshot(snapshot: unknown[]): RuleBuilder[] {
             type: 'TEXT_REQUIRED_PHRASE' as const,
             applyTo: 'WHOLE_DOCUMENT' as const,
             fieldPathText: '',
+            speaker: 'ANY',
             phrase: '',
-            caseSensitive: false
+            caseSensitive: false,
+            withinFirstCharsText: '',
+            withinLastCharsText: ''
         };
     });
 }
@@ -340,7 +442,29 @@ export default function TemplateRulesPage() {
                         <div key={r.uiId} className="rounded border p-3">
                             <div className="flex flex-wrap items-end justify-between gap-3">
                                 <label className="flex min-w-[180px] flex-col gap-1">
-                                    <span className="text-xs text-zinc-600">Rule type</span>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-xs text-zinc-600">Rule type</span>
+                                        <button
+                                            type="button"
+                                            className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-zinc-300 bg-white text-[11px] font-semibold text-zinc-600"
+                                            aria-label="Explain rule type"
+                                            title={
+                                                r.type === 'TEXT_REQUIRED_PHRASE'
+                                                    ? 'Must include phrase: Passes only if this exact wording appears somewhere in the text (you can also limit it to the start or end of the conversation).'
+                                                    : r.type === 'TEXT_KEYWORD_BLACKLIST'
+                                                        ? 'Must not include words: Fails if any of the banned words/phrases appear in the text.'
+                                                        : r.type === 'TEXT_REGEX'
+                                                            ? 'Must match pattern: Use this when the text can be in many formats, but follows a “shape”. Example: an order number like ORDER-12345. This rule passes if it finds that kind of text.'
+                                                            : r.type === 'REQUIRED_FIELD'
+                                                                ? 'Required field (JSON input): Use this for structured data (not plain text). It checks that a specific field exists, like customer.email or ticket.id.'
+                                                                : r.type === 'CUSTOM_TEXT_CHECK'
+                                                                    ? 'Custom rule is deprecated and can no longer be added. Switch it to another rule type or delete it.'
+                                                                    : 'Rule type explanation'
+                                            }
+                                        >
+                                            i
+                                        </button>
+                                    </div>
                                     <select
                                         className="rounded border px-2 py-2 text-sm"
                                         value={r.type}
@@ -360,8 +484,11 @@ export default function TemplateRulesPage() {
                                                             severity: 'MAJOR',
                                                             applyTo: 'WHOLE_DOCUMENT',
                                                             fieldPathText: '',
+                                                            speaker: 'ANY',
                                                             phrase: '',
                                                             caseSensitive: false,
+                                                            withinFirstCharsText: '',
+                                                            withinLastCharsText: '',
                                                             enabled: true
                                                         };
                                                     }
@@ -373,6 +500,7 @@ export default function TemplateRulesPage() {
                                                             severity: 'MAJOR',
                                                             applyTo: 'WHOLE_DOCUMENT',
                                                             fieldPathText: '',
+                                                            speaker: 'ANY',
                                                             pattern: '',
                                                             flags: 'i',
                                                             mustMatch: true,
@@ -387,6 +515,7 @@ export default function TemplateRulesPage() {
                                                             severity: 'MINOR',
                                                             applyTo: 'WHOLE_DOCUMENT',
                                                             fieldPathText: '',
+                                                            speaker: 'ANY',
                                                             keywordsText: '',
                                                             caseSensitive: false,
                                                             enabled: true
@@ -408,6 +537,11 @@ export default function TemplateRulesPage() {
                                         <option value="TEXT_REQUIRED_PHRASE">Must include phrase</option>
                                         <option value="TEXT_KEYWORD_BLACKLIST">Must not include words</option>
                                         <option value="TEXT_REGEX">Must match pattern</option>
+                                        {r.type === 'CUSTOM_TEXT_CHECK' ? (
+                                            <option value="CUSTOM_TEXT_CHECK" disabled>
+                                                Custom rule (deprecated)
+                                            </option>
+                                        ) : null}
                                         <option value="REQUIRED_FIELD">Required field (JSON input)</option>
                                     </select>
                                 </label>
@@ -496,6 +630,26 @@ export default function TemplateRulesPage() {
                                                 />
                                             </label>
                                         ) : null}
+
+                                        {r.type === 'TEXT_REQUIRED_PHRASE' || r.type === 'TEXT_KEYWORD_BLACKLIST' || r.type === 'TEXT_REGEX' ? (
+                                            <label className="flex min-w-[180px] flex-col gap-1">
+                                                <span className="text-xs text-zinc-600">Check who?</span>
+                                                <select
+                                                    className="rounded border px-2 py-2 text-sm"
+                                                    value={(r as any).speaker ?? 'ANY'}
+                                                    disabled={!canEdit}
+                                                    onChange={(e) =>
+                                                        setRules((prev) =>
+                                                            prev.map((rr) => (rr.uiId === r.uiId ? { ...rr, speaker: e.target.value as Speaker } : rr))
+                                                        )
+                                                    }
+                                                >
+                                                    <option value="ANY">Entire chat</option>
+                                                    <option value="OPERATOR">Operator only</option>
+                                                    <option value="CUSTOMER">Customer only</option>
+                                                </select>
+                                            </label>
+                                        ) : null}
                                     </div>
                                 ) : (
                                     <div className="flex flex-wrap items-end gap-3">
@@ -552,6 +706,60 @@ export default function TemplateRulesPage() {
                                             />
                                             Case sensitive
                                         </label>
+
+                                        <label className="flex min-w-[170px] flex-col gap-1">
+                                            <span className="text-xs text-zinc-600">Within first chars (optional)</span>
+                                            <input
+                                                className="rounded border px-2 py-2 text-sm"
+                                                value={r.withinFirstCharsText ?? ''}
+                                                disabled={!canEdit}
+                                                onChange={(e) =>
+                                                    setRules((prev) =>
+                                                        prev.map((rr) =>
+                                                            rr.uiId === r.uiId
+                                                                ? {
+                                                                    ...rr,
+                                                                    withinFirstCharsText: e.target.value,
+                                                                    // keep mutually exclusive
+                                                                    withinLastCharsText: e.target.value.trim() ? '' : ((rr as any).withinLastCharsText ?? '')
+                                                                }
+                                                                : rr
+                                                        )
+                                                    )
+                                                }
+                                                placeholder="500"
+                                            />
+                                        </label>
+
+                                        <label className="flex min-w-[170px] flex-col gap-1">
+                                            <span className="text-xs text-zinc-600">Within last chars (optional)</span>
+                                            <input
+                                                className="rounded border px-2 py-2 text-sm"
+                                                value={r.withinLastCharsText ?? ''}
+                                                disabled={!canEdit}
+                                                onChange={(e) =>
+                                                    setRules((prev) =>
+                                                        prev.map((rr) =>
+                                                            rr.uiId === r.uiId
+                                                                ? {
+                                                                    ...rr,
+                                                                    withinLastCharsText: e.target.value,
+                                                                    // keep mutually exclusive
+                                                                    withinFirstCharsText: e.target.value.trim() ? '' : ((rr as any).withinFirstCharsText ?? '')
+                                                                }
+                                                                : rr
+                                                        )
+                                                    )
+                                                }
+                                                placeholder="500"
+                                            />
+                                        </label>
+                                    </div>
+                                ) : null}
+
+                                {r.type === 'CUSTOM_TEXT_CHECK' ? (
+                                    <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                                        This rule type is deprecated and can no longer be added. Switch it to another rule type or delete it.
                                     </div>
                                 ) : null}
 
@@ -643,14 +851,83 @@ export default function TemplateRulesPage() {
                                             severity: 'MAJOR',
                                             applyTo: 'WHOLE_DOCUMENT',
                                             fieldPathText: '',
+                                            speaker: 'ANY',
                                             phrase: '',
                                             caseSensitive: false,
+                                            withinFirstCharsText: '',
+                                            withinLastCharsText: '',
                                             enabled: true
                                         }
                                     ])
                                 }
                             >
                                 + Add Rule
+                            </button>
+
+                            <button
+                                type="button"
+                                className="rounded border bg-white px-3 py-2 text-sm hover:bg-zinc-50"
+                                onClick={() =>
+                                    setRules((prev) => [
+                                        ...prev,
+                                        {
+                                            uiId: makeUiId(),
+                                            type: 'TEXT_REQUIRED_PHRASE',
+                                            name: 'Call opening present (edit phrase)',
+                                            severity: 'MAJOR',
+                                            applyTo: 'WHOLE_DOCUMENT',
+                                            fieldPathText: '',
+                                            speaker: 'OPERATOR',
+                                            phrase: 'thank you for calling',
+                                            caseSensitive: false,
+                                            withinFirstCharsText: '600',
+                                            withinLastCharsText: '',
+                                            enabled: true
+                                        },
+                                        {
+                                            uiId: makeUiId(),
+                                            type: 'TEXT_REQUIRED_PHRASE',
+                                            name: 'Agent introduction present (edit phrase)',
+                                            severity: 'MAJOR',
+                                            applyTo: 'WHOLE_DOCUMENT',
+                                            fieldPathText: '',
+                                            speaker: 'OPERATOR',
+                                            phrase: 'my name is',
+                                            caseSensitive: false,
+                                            withinFirstCharsText: '900',
+                                            withinLastCharsText: '',
+                                            enabled: true
+                                        },
+                                        {
+                                            uiId: makeUiId(),
+                                            type: 'TEXT_REQUIRED_PHRASE',
+                                            name: 'Call closing present (edit phrase)',
+                                            severity: 'MINOR',
+                                            applyTo: 'WHOLE_DOCUMENT',
+                                            fieldPathText: '',
+                                            speaker: 'OPERATOR',
+                                            phrase: 'anything else',
+                                            caseSensitive: false,
+                                            withinFirstCharsText: '',
+                                            withinLastCharsText: '900',
+                                            enabled: true
+                                        },
+                                        {
+                                            uiId: makeUiId(),
+                                            type: 'TEXT_KEYWORD_BLACKLIST',
+                                            name: 'No unprofessional words (edit list)',
+                                            severity: 'MAJOR',
+                                            applyTo: 'WHOLE_DOCUMENT',
+                                            fieldPathText: '',
+                                            speaker: 'OPERATOR',
+                                            keywordsText: 'idiot, stupid, shut up',
+                                            caseSensitive: false,
+                                            enabled: true
+                                        }
+                                    ])
+                                }
+                            >
+                                + Add Call/Chat basics
                             </button>
                         </div>
                     )}

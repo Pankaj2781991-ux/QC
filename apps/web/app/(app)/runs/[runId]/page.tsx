@@ -83,6 +83,7 @@ type ResultSummaryDoc = {
   engineVersion?: string;
   writeState?: 'WRITING' | 'COMPLETE';
   expectedRuleCount?: number;
+  chat?: { enabled: boolean; strategy: string; chatCount: number; warning?: string };
   summary?: {
     overallOutcome?: 'PASS' | 'FAIL';
     overallScore?: number;
@@ -93,6 +94,21 @@ type ResultSummaryDoc = {
     templateVersionId?: string;
     templateVersion?: number;
     inputFingerprint?: { type: 'SHA256'; value: string };
+  };
+};
+
+type ChatResultSummary = {
+  id: string;
+  chatResultId?: string;
+  index: number;
+  title: string;
+  chatId?: string;
+  participants?: { operator?: string; customer?: string };
+  summary?: {
+    overallOutcome?: 'PASS' | 'FAIL';
+    overallScore?: number;
+    failedRuleIds?: string[];
+    ruleCounts?: { total: number; pass: number; fail: number; notEvaluated: number; error: number };
   };
 };
 
@@ -122,6 +138,11 @@ type RuleResultsResponse = {
   nextStartAfter: number | null;
 };
 
+type ChatResultsResponse = {
+  chatResults: ChatResultSummary[];
+  nextStartAfter: number | null;
+};
+
 function tsLabel(ts: TimestampLike): string {
   if (!ts) return '—';
   // Admin SDK sends Timestamp objects; API currently returns raw data. Best-effort display.
@@ -146,6 +167,12 @@ export default function RunResultsPage() {
   const [ruleResults, setRuleResults] = useState<RuleResult[]>([]);
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
 
+  const [chatResults, setChatResults] = useState<ChatResultSummary[]>([]);
+  const [selectedChatId, setSelectedChatId] = useState<string>('__ALL__');
+
+  const [chatRuleResults, setChatRuleResults] = useState<RuleResult[]>([]);
+  const [chatNextStartAfter, setChatNextStartAfter] = useState<number | null>(-1);
+
   const [busy, setBusy] = useState(false);
   const [autoRefreshing, setAutoRefreshing] = useState(false);
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
@@ -157,7 +184,15 @@ export default function RunResultsPage() {
   const refreshInFlightRef = useRef(false);
   const consecutiveAutoFailuresRef = useRef(0);
 
-  const selected = useMemo(() => ruleResults.find((r) => r.id === selectedRuleId) ?? null, [ruleResults, selectedRuleId]);
+  const activeRuleResults = useMemo(
+    () => (selectedChatId === '__ALL__' ? ruleResults : chatRuleResults),
+    [selectedChatId, ruleResults, chatRuleResults]
+  );
+
+  const selected = useMemo(
+    () => activeRuleResults.find((r) => r.id === selectedRuleId) ?? null,
+    [activeRuleResults, selectedRuleId]
+  );
 
   async function refresh(options?: { silent?: boolean }) {
     if (!user || !runId) return;
@@ -178,6 +213,14 @@ export default function RunResultsPage() {
       const resp = await client.request<RunGetResponse>(`/v1/qc-runs/${encodeURIComponent(runId)}`);
       setRun(resp.run);
       setResultSummary(resp.resultSummary);
+
+      const chatEnabled = Boolean(resp.resultSummary?.chat?.enabled);
+      if (resp.run.status === 'SUCCEEDED' && chatEnabled && chatResults.length === 0) {
+        const cr = await client.request<ChatResultsResponse>(
+          `/v1/qc-runs/${encodeURIComponent(runId)}/chat-results?limit=200&startAfter=-1`
+        );
+        setChatResults(cr.chatResults ?? []);
+      }
 
       setLastUpdatedAtIso(new Date().toISOString());
       consecutiveAutoFailuresRef.current = 0;
@@ -214,22 +257,69 @@ export default function RunResultsPage() {
   }
 
   async function loadMore() {
-    if (!user || !runId || nextStartAfter === null) return;
+    if (!user || !runId) return;
+    if (selectedChatId === '__ALL__' && nextStartAfter === null) return;
+    if (selectedChatId !== '__ALL__' && chatNextStartAfter === null) return;
     setBusy(true);
     setError(null);
     try {
       const client = await createAuthedClient(user);
-      const rr = await client.request<RuleResultsResponse>(
-        `/v1/qc-runs/${encodeURIComponent(runId)}/rule-results?limit=100&startAfter=${encodeURIComponent(String(nextStartAfter))}`
-      );
-      setRuleResults((prev) => [...prev, ...(rr.ruleResults ?? [])]);
-      setNextStartAfter(rr.nextStartAfter);
+      if (selectedChatId === '__ALL__') {
+        const rr = await client.request<RuleResultsResponse>(
+          `/v1/qc-runs/${encodeURIComponent(runId)}/rule-results?limit=100&startAfter=${encodeURIComponent(String(nextStartAfter))}`
+        );
+        setRuleResults((prev) => [...prev, ...(rr.ruleResults ?? [])]);
+        setNextStartAfter(rr.nextStartAfter);
+      } else {
+        if (chatNextStartAfter === null) return;
+        const rr = await client.request<RuleResultsResponse>(
+          `/v1/qc-runs/${encodeURIComponent(runId)}/chat-results/${encodeURIComponent(selectedChatId)}/rule-results?limit=100&startAfter=${encodeURIComponent(String(chatNextStartAfter))}`
+        );
+        setChatRuleResults((prev) => [...prev, ...(rr.ruleResults ?? [])]);
+        setChatNextStartAfter(rr.nextStartAfter);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unknown error');
     } finally {
       setBusy(false);
     }
   }
+
+  useEffect(() => {
+    // When switching chats, load first page of that chat's rule results.
+    if (!user || !runId) return;
+    if (selectedChatId === '__ALL__') {
+      setChatRuleResults([]);
+      setChatNextStartAfter(-1);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      setBusy(true);
+      setError(null);
+      try {
+        const client = await createAuthedClient(user);
+        const rr = await client.request<RuleResultsResponse>(
+          `/v1/qc-runs/${encodeURIComponent(runId)}/chat-results/${encodeURIComponent(selectedChatId)}/rule-results?limit=100&startAfter=-1`
+        );
+        if (cancelled) return;
+        setChatRuleResults(rr.ruleResults ?? []);
+        setChatNextStartAfter(rr.nextStartAfter);
+        const first = (rr.ruleResults ?? [])[0]?.id ?? null;
+        setSelectedRuleId(first);
+      } catch (e) {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : 'Unknown error');
+      } finally {
+        if (!cancelled) setBusy(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, runId, selectedChatId]);
 
   useEffect(() => {
     if (!loading && user && claims.tenantId && runId) void refresh();
@@ -336,12 +426,57 @@ export default function RunResultsPage() {
             <div className="mt-2 text-xs text-red-700">Code: {run.error.code}</div>
           </div>
         ) : null}
+
+        {resultSummary?.chat?.warning ? (
+          <div className="mt-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+            <div className="font-medium">Chat splitting note</div>
+            <div className="mt-1 text-xs">{resultSummary.chat.warning}</div>
+          </div>
+        ) : null}
       </div>
 
       {run?.status === 'SUCCEEDED' ? (
         <div className="grid gap-6 lg:grid-cols-3">
           <div className="lg:col-span-2 rounded-lg border bg-white p-4">
             <h2 className="text-lg font-semibold text-zinc-950">Rule results</h2>
+
+            {resultSummary?.chat?.enabled ? (
+              <div className="mt-3 rounded border bg-zinc-50 p-3 text-sm text-zinc-700">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs text-zinc-500">Chat breakdown</div>
+                    <div className="font-medium">{resultSummary.chat.chatCount} chats detected</div>
+                  </div>
+                  <label className="flex items-center gap-2 text-sm">
+                    <span className="text-zinc-600">Chat</span>
+                    <select
+                      className="rounded border bg-white px-2 py-1"
+                      value={selectedChatId}
+                      onChange={(e) => {
+                        setSelectedChatId(e.target.value);
+                        setSelectedRuleId(null);
+                      }}
+                    >
+                      <option value="__ALL__">All chats (combined)</option>
+                      {chatResults
+                        .slice()
+                        .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+                        .map((c) => (
+                          <option key={c.id} value={c.id}>
+                            Chat {Number(c.index ?? 0) + 1}: {c.title}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                </div>
+                {resultSummary.chat.warning ? (
+                  <div className="mt-2 text-xs text-amber-900">
+                    Note: {resultSummary.chat.warning}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="mt-3 overflow-x-auto">
               <table className="w-full border-collapse text-sm">
                 <thead>
@@ -354,7 +489,7 @@ export default function RunResultsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {ruleResults.map((r) => (
+                  {activeRuleResults.map((r) => (
                     <tr
                       key={r.id}
                       className={`border-b last:border-b-0 ${selectedRuleId === r.id ? 'bg-zinc-50' : ''}`}
@@ -375,7 +510,7 @@ export default function RunResultsPage() {
               </table>
             </div>
 
-            {nextStartAfter !== null ? (
+            {(selectedChatId === '__ALL__' ? nextStartAfter : chatNextStartAfter) !== null ? (
               <div className="mt-4">
                 <button
                   className="rounded border bg-white px-3 py-1 text-sm hover:bg-zinc-50 disabled:opacity-60"

@@ -174,7 +174,19 @@ export default function IntegrationsPage() {
           }}
         >
           <label className="flex flex-col gap-1">
-            <span className="text-sm text-zinc-700">Base URL</span>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-zinc-700">Base URL</span>
+              <button
+                type="button"
+                className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-zinc-300 bg-white text-[11px] font-semibold text-zinc-600"
+                aria-label="Explain Base URL"
+                title={
+                  'Base URL is the main address of the system you are connecting to. You usually copy this from that system\'s API documentation. Example: https://api.company.com (do not include the /v1/... part here). We need it so QC knows where to send requests to fetch your data.'
+                }
+              >
+                i
+              </button>
+            </div>
             <input
               className="rounded border px-3 py-2"
               value={baseUrl}
@@ -185,7 +197,19 @@ export default function IntegrationsPage() {
           </label>
 
           <label className="flex flex-col gap-1">
-            <span className="text-sm text-zinc-700">Path</span>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-zinc-700">Path</span>
+              <button
+                type="button"
+                className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-zinc-300 bg-white text-[11px] font-semibold text-zinc-600"
+                aria-label="Explain Path"
+                title={
+                  'Path is the specific API route that returns the data you want. It starts with /. Example: /v1/tickets or /api/calls. We combine Base URL + Path to fetch your data automatically when you run QC from an integration.'
+                }
+              >
+                i
+              </button>
+            </div>
             <input
               className="rounded border px-3 py-2"
               value={path}
@@ -197,12 +221,36 @@ export default function IntegrationsPage() {
 
           <div className="grid gap-3 md:grid-cols-2">
             <label className="flex flex-col gap-1">
-              <span className="text-sm text-zinc-700">API key header</span>
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-zinc-700">API key header</span>
+                <button
+                  type="button"
+                  className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-zinc-300 bg-white text-[11px] font-semibold text-zinc-600"
+                  aria-label="Explain API key header"
+                  title={
+                    'This is the name of the “box” (header) where the other system expects the API key. Common values are Authorization or X-API-Key. If you are unsure, check the other system\'s API docs.'
+                  }
+                >
+                  i
+                </button>
+              </div>
               <input className="rounded border px-3 py-2" value={apiKeyHeader} onChange={(e) => setApiKeyHeader(e.target.value)} />
             </label>
 
             <label className="flex flex-col gap-1">
-              <span className="text-sm text-zinc-700">API key prefix</span>
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-zinc-700">API key prefix</span>
+                <button
+                  type="button"
+                  className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-zinc-300 bg-white text-[11px] font-semibold text-zinc-600"
+                  aria-label="Explain API key prefix"
+                  title={
+                    'Some systems want extra text before the key. Example: “Bearer ” (note the space) so the final value becomes “Bearer YOUR_KEY”. If the docs show the key by itself, leave this blank.'
+                  }
+                >
+                  i
+                </button>
+              </div>
               <input className="rounded border px-3 py-2" value={apiKeyPrefix} onChange={(e) => setApiKeyPrefix(e.target.value)} />
             </label>
           </div>

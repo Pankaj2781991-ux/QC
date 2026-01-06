@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { QcRuleDefinitionSchema, runQc } from '@qc/qc-engine';
+import { QcRuleDefinitionSchema, QC_ENGINE_VERSION, runQc } from '@qc/qc-engine';
 import { tenantSubdocPath } from './firestorePaths.js';
 import { normalizeFromBuffer, normalizeInlineJson } from './qcNormalize.js';
 import { writeAuditLog } from './audit.js';
@@ -8,6 +8,60 @@ import { getConnectorForIntegration } from '../connectors/registry.js';
 import { asPublicError } from './qcPublicError.js';
 import { getAdmin, Timestamp } from './firebaseAdmin.js';
 import { fingerprintFromNormalizedInput, mapRuleResultToDoc, sha256Base16, summarizeRuleStatuses } from './qcResultMapping.js';
+import { splitTranscriptIntoChats } from './qcChatSplit.js';
+function combineAggregatedRuleDocs(perChatRuleDocs) {
+    if (!perChatRuleDocs.length)
+        return [];
+    const ruleCount = perChatRuleDocs[0].docs.length;
+    const out = [];
+    const statusRank = { NOT_EVALUATED: 0, PASS: 1, FAIL: 2, ERROR: 3 };
+    const rankToStatus = (rank) => {
+        if (rank >= 3)
+            return 'ERROR';
+        if (rank === 2)
+            return 'FAIL';
+        if (rank === 1)
+            return 'PASS';
+        return 'NOT_EVALUATED';
+    };
+    for (let i = 0; i < ruleCount; i++) {
+        const entries = perChatRuleDocs.map((x) => ({ chat: x.chat, doc: x.docs[i] }));
+        const worstRank = Math.max(...entries.map((e) => statusRank[e.doc.status] ?? 0));
+        const status = rankToStatus(worstRank);
+        const score = Math.min(...entries.map((e) => Number.isFinite(e.doc.score) ? e.doc.score : 0));
+        const reason = status === 'FAIL' || status === 'NOT_EVALUATED'
+            ? entries.find((e) => (e.doc.status === status || (status === 'FAIL' && e.doc.status === 'FAIL')) && e.doc.reason)?.doc.reason
+            : undefined;
+        const evidence = [];
+        for (const e of entries) {
+            if (e.doc.status !== status && !(status === 'FAIL' && e.doc.status === 'FAIL'))
+                continue;
+            const prefix = `Chat ${e.chat.index + 1}${e.chat.title ? ` (${e.chat.title})` : ''}: `;
+            for (const ev of e.doc.evidence ?? []) {
+                if (evidence.length >= 25)
+                    break;
+                evidence.push({ ...ev, detail: ev.detail ? `${prefix}${ev.detail}` : prefix.trimEnd() });
+            }
+            if (evidence.length >= 25)
+                break;
+        }
+        const base = entries[0].doc;
+        out.push({
+            ...base,
+            status,
+            score,
+            ...(reason ? { reason } : {}),
+            evidence
+        });
+    }
+    return out;
+}
+function combineRunSummaryFromChats(chatSummaries) {
+    const overallOutcome = chatSummaries.some((c) => c.summary.overallOutcome === 'FAIL') ? 'FAIL' : 'PASS';
+    const overallScore = chatSummaries.length ? Math.min(...chatSummaries.map((c) => c.summary.overallScore)) : 1;
+    const failedRuleIds = Array.from(new Set(chatSummaries.flatMap((c) => c.summary.failedRuleIds ?? []).filter((x) => typeof x === 'string')));
+    return { overallOutcome, overallScore, failedRuleIds };
+}
 async function fetchTemplateVersion(tenantId, templateVersionId) {
     const { db } = getAdmin();
     const snap = await db.doc(tenantSubdocPath(tenantId, 'qc_template_versions', templateVersionId)).get();
@@ -164,55 +218,119 @@ export async function processQcRun(input) {
             normalizedInput = await loadInputForRun(input.tenantId, run);
             effectiveFingerprint = fingerprintFromNormalizedInput(normalizedInput);
         }
-        const result = runQc({
-            input: normalizedInput,
-            rules,
-            executedAtIso: new Date().toISOString(),
-            // AI signals are always optional and must be supplied by explicit service calls.
-            options: { passScoreThreshold: 1, blockerFailureForcesFail: true }
-        });
-        const executedAt = Timestamp.fromDate(new Date(result.summary.executedAt));
-        const resultId = uuidv4();
-        const resultRef = db.doc(tenantSubdocPath(input.tenantId, 'qc_run_results', resultId));
-        const ruleResults = result.ruleResults.map((rr, i) => mapRuleResultToDoc({
-            order: i,
-            rule: rules[i],
-            result: rr,
-            ...(run.inputSource === 'UPLOAD'
-                ? {
-                    source: {
-                        ...(uploadSource?.storagePath ? { storagePath: uploadSource.storagePath } : {}),
-                        ...(uploadSource?.fileName ? { fileName: uploadSource.fileName } : {}),
-                        ...(uploadSource?.contentType ? { contentType: uploadSource.contentType } : {})
-                    }
+        const executedAtIso = new Date().toISOString();
+        const sourceForEvidence = run.inputSource === 'UPLOAD'
+            ? {
+                source: {
+                    ...(uploadSource?.storagePath ? { storagePath: uploadSource.storagePath } : {}),
+                    ...(uploadSource?.fileName ? { fileName: uploadSource.fileName } : {}),
+                    ...(uploadSource?.contentType ? { contentType: uploadSource.contentType } : {})
                 }
-                : {})
-        }));
-        const ruleCounts = summarizeRuleStatuses(ruleResults);
-        // Prefer single atomic batch when feasible.
-        const totalWritesNeeded = 1 /* result */ + ruleResults.length + 1 /* run update */;
-        if (totalWritesNeeded <= 450) {
+            }
+            : {};
+        // If input is text, attempt to split into multiple chats and evaluate each chat separately.
+        const split = normalizedInput.kind === 'text' ? splitTranscriptIntoChats(normalizedInput.text) : null;
+        const multiChatEnabled = Boolean(split && split.chats.length >= 2);
+        let resultId = uuidv4();
+        const resultRef = db.doc(tenantSubdocPath(input.tenantId, 'qc_run_results', resultId));
+        let aggregatedRuleDocs;
+        let ruleCounts;
+        let runSummary;
+        let chatSummaries = null;
+        let perChatComputed = null;
+        let chatMeta = null;
+        let executedAt;
+        if (multiChatEnabled) {
+            const chats = split.chats;
+            perChatComputed = chats.map((chat) => {
+                const chatResult = runQc({
+                    input: { kind: 'text', text: chat.text },
+                    rules,
+                    executedAtIso,
+                    options: { passScoreThreshold: 1, blockerFailureForcesFail: true }
+                });
+                const docs = chatResult.ruleResults.map((rr, i) => mapRuleResultToDoc({
+                    order: i,
+                    rule: rules[i],
+                    result: rr,
+                    ...sourceForEvidence,
+                    contextPrefix: ''
+                }));
+                const counts = summarizeRuleStatuses(docs);
+                return {
+                    chat,
+                    summary: {
+                        overallOutcome: chatResult.summary.overallOutcome,
+                        overallScore: chatResult.summary.overallScore,
+                        failedRuleIds: chatResult.summary.failedRuleIds,
+                        ruleCounts: counts
+                    },
+                    ruleDocs: docs
+                };
+            });
+            // Use the first executedAt (all use the same executedAtIso, but qc-engine echoes it back).
+            executedAt = Timestamp.fromDate(new Date(executedAtIso));
+            chatSummaries = perChatComputed.map((c) => ({
+                index: c.chat.index,
+                title: c.chat.title,
+                ...(c.chat.chatId ? { chatId: c.chat.chatId } : {}),
+                ...(c.chat.participants ? { participants: c.chat.participants } : {}),
+                summary: c.summary
+            }));
+            aggregatedRuleDocs = combineAggregatedRuleDocs(perChatComputed.map((c) => ({ chat: c.chat, docs: c.ruleDocs })));
+            ruleCounts = summarizeRuleStatuses(aggregatedRuleDocs);
+            runSummary = combineRunSummaryFromChats(chatSummaries);
+            chatMeta = { enabled: true, strategy: split.strategy, chatCount: chats.length, ...(split.warning ? { warning: split.warning } : {}) };
+        }
+        else {
+            const result = runQc({
+                input: normalizedInput,
+                rules,
+                executedAtIso,
+                // AI signals are always optional and must be supplied by explicit service calls.
+                options: { passScoreThreshold: 1, blockerFailureForcesFail: true }
+            });
+            executedAt = Timestamp.fromDate(new Date(result.summary.executedAt));
+            aggregatedRuleDocs = result.ruleResults.map((rr, i) => mapRuleResultToDoc({
+                order: i,
+                rule: rules[i],
+                result: rr,
+                ...sourceForEvidence
+            }));
+            ruleCounts = summarizeRuleStatuses(aggregatedRuleDocs);
+            runSummary = {
+                overallOutcome: result.summary.overallOutcome,
+                overallScore: result.summary.overallScore,
+                failedRuleIds: result.summary.failedRuleIds
+            };
+            chatMeta = split && split.warning ? { enabled: false, strategy: split.strategy, chatCount: 1, warning: split.warning } : null;
+        }
+        // Prefer single atomic batch when feasible (single-chat only).
+        const totalWritesNeeded = 1 /* result */ + aggregatedRuleDocs.length + 1 /* run update */;
+        const canSingleBatch = !multiChatEnabled && totalWritesNeeded <= 450;
+        if (canSingleBatch) {
             const batch = db.batch();
             batch.create(resultRef, {
                 resultId,
                 tenantId: input.tenantId,
                 runId: run.runId,
                 createdAt: Timestamp.now(),
-                engineVersion: result.summary.engineVersion,
+                engineVersion: QC_ENGINE_VERSION,
                 executedAt,
                 summary: {
-                    overallOutcome: result.summary.overallOutcome,
-                    overallScore: result.summary.overallScore,
-                    failedRuleIds: result.summary.failedRuleIds,
+                    overallOutcome: runSummary.overallOutcome,
+                    overallScore: runSummary.overallScore,
+                    failedRuleIds: runSummary.failedRuleIds,
                     ruleCounts
                 },
                 integrity: {
                     ...(run.templateVersionId ? { templateVersionId: run.templateVersionId } : { templateId: run.templateId }),
                     templateVersion: run.templateVersion,
                     inputFingerprint: effectiveFingerprint
-                }
+                },
+                ...(chatMeta ? { chat: chatMeta } : {})
             });
-            for (const rr of ruleResults) {
+            for (const rr of aggregatedRuleDocs) {
                 const rrId = uuidv4();
                 const rrRef = resultRef.collection('rule_results').doc(rrId);
                 batch.create(rrRef, {
@@ -229,18 +347,18 @@ export async function processQcRun(input) {
             await batch.commit();
         }
         else {
-            // Two-phase write for large rule sets: run is SUCCEEDED only after all rule docs exist.
+            // Two-phase write for large rule sets OR multi-chat: run is SUCCEEDED only after all docs exist.
             await resultRef.create({
                 resultId,
                 tenantId: input.tenantId,
                 runId: run.runId,
                 createdAt: Timestamp.now(),
-                engineVersion: result.summary.engineVersion,
+                engineVersion: QC_ENGINE_VERSION,
                 executedAt,
                 summary: {
-                    overallOutcome: result.summary.overallOutcome,
-                    overallScore: result.summary.overallScore,
-                    failedRuleIds: result.summary.failedRuleIds,
+                    overallOutcome: runSummary.overallOutcome,
+                    overallScore: runSummary.overallScore,
+                    failedRuleIds: runSummary.failedRuleIds,
                     ruleCounts
                 },
                 integrity: {
@@ -248,19 +366,48 @@ export async function processQcRun(input) {
                     templateVersion: run.templateVersion,
                     inputFingerprint: effectiveFingerprint
                 },
+                ...(chatMeta ? { chat: chatMeta } : {}),
                 writeState: 'WRITING',
-                expectedRuleCount: ruleResults.length
+                expectedRuleCount: aggregatedRuleDocs.length
             });
             const chunkSize = 400;
-            for (let i = 0; i < ruleResults.length; i += chunkSize) {
+            for (let i = 0; i < aggregatedRuleDocs.length; i += chunkSize) {
                 const batch = db.batch();
-                const chunk = ruleResults.slice(i, i + chunkSize);
+                const chunk = aggregatedRuleDocs.slice(i, i + chunkSize);
                 for (const rr of chunk) {
                     const rrId = uuidv4();
                     const rrRef = resultRef.collection('rule_results').doc(rrId);
                     batch.create(rrRef, { ruleResultId: rrId, ...rr });
                 }
                 await batch.commit();
+            }
+            if (multiChatEnabled && chatSummaries) {
+                // Write chat summaries + per-chat rule_results.
+                for (const chat of chatSummaries) {
+                    const chatResultId = uuidv4();
+                    const chatRef = resultRef.collection('chat_results').doc(chatResultId);
+                    await chatRef.create({
+                        chatResultId,
+                        index: chat.index,
+                        title: chat.title,
+                        ...(chat.chatId ? { chatId: chat.chatId } : {}),
+                        ...(chat.participants ? { participants: chat.participants } : {}),
+                        summary: chat.summary,
+                        createdAt: Timestamp.now()
+                    });
+                    const found = perChatComputed?.find((c) => c.chat.index === chat.index);
+                    const perDocs = found?.ruleDocs ?? [];
+                    for (let i = 0; i < perDocs.length; i += chunkSize) {
+                        const batch = db.batch();
+                        const chunk = perDocs.slice(i, i + chunkSize);
+                        for (const rr of chunk) {
+                            const rrId = uuidv4();
+                            const rrRef = chatRef.collection('rule_results').doc(rrId);
+                            batch.create(rrRef, { ruleResultId: rrId, ...rr });
+                        }
+                        await batch.commit();
+                    }
+                }
             }
             await db.runTransaction(async (tx) => {
                 const latest = await tx.get(runRef);

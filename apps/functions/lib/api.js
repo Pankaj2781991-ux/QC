@@ -521,5 +521,68 @@ app.get('/v1/qc-runs/:runId/rule-results', asyncHandler(async (req, res) => {
     const lastOrder = snap.docs.length ? snap.docs[snap.docs.length - 1].data().order : null;
     res.json({ ruleResults, nextStartAfter: lastOrder });
 }));
+app.get('/v1/qc-runs/:runId/chat-results', asyncHandler(async (req, res) => {
+    const auth = await requireAuth(req.header('authorization'));
+    requireRole(auth.role, 'Viewer');
+    const { db } = getAdmin();
+    const runId = req.params.runId;
+    if (!runId)
+        throw new ApiError('INVALID_ARGUMENT', 'runId is required', 400);
+    const querySchema = z.object({
+        limit: z.coerce.number().int().min(1).max(200).default(50),
+        startAfter: z.coerce.number().int().min(-1).default(-1)
+    });
+    const q = querySchema.parse(req.query);
+    const runSnap = await db.doc(tenantSubdocPath(auth.tenantId, 'qc_runs', runId)).get();
+    if (!runSnap.exists)
+        throw new ApiError('NOT_FOUND', 'Run not found', 404);
+    const run = runSnap.data();
+    const resultId = run.resultId;
+    if (!resultId)
+        throw new ApiError('FAILED_PRECONDITION', 'Run has no results yet', 412);
+    const coll = db.collection(tenantSubcollectionPath(auth.tenantId, `qc_run_results/${resultId}/chat_results`));
+    let query = coll.orderBy('index', 'asc').limit(q.limit);
+    if (q.startAfter >= 0)
+        query = query.startAfter(q.startAfter);
+    const snap = await query.get();
+    const chatResults = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    const lastIndex = snap.docs.length ? snap.docs[snap.docs.length - 1].data().index : null;
+    res.json({ chatResults, nextStartAfter: lastIndex });
+}));
+app.get('/v1/qc-runs/:runId/chat-results/:chatResultId/rule-results', asyncHandler(async (req, res) => {
+    const auth = await requireAuth(req.header('authorization'));
+    requireRole(auth.role, 'Viewer');
+    const { db } = getAdmin();
+    const runId = req.params.runId;
+    const chatResultId = req.params.chatResultId;
+    if (!runId)
+        throw new ApiError('INVALID_ARGUMENT', 'runId is required', 400);
+    if (!chatResultId)
+        throw new ApiError('INVALID_ARGUMENT', 'chatResultId is required', 400);
+    const querySchema = z.object({
+        limit: z.coerce.number().int().min(1).max(200).default(50),
+        startAfter: z.coerce.number().int().min(-1).default(-1)
+    });
+    const q = querySchema.parse(req.query);
+    const runSnap = await db.doc(tenantSubdocPath(auth.tenantId, 'qc_runs', runId)).get();
+    if (!runSnap.exists)
+        throw new ApiError('NOT_FOUND', 'Run not found', 404);
+    const run = runSnap.data();
+    const resultId = run.resultId;
+    if (!resultId)
+        throw new ApiError('FAILED_PRECONDITION', 'Run has no results yet', 412);
+    const chatRef = db.doc(tenantSubdocPath(auth.tenantId, `qc_run_results/${resultId}/chat_results`, chatResultId));
+    const chatSnap = await chatRef.get();
+    if (!chatSnap.exists)
+        throw new ApiError('NOT_FOUND', 'Chat results not found', 404);
+    const coll = chatRef.collection('rule_results');
+    let query = coll.orderBy('order', 'asc').limit(q.limit);
+    if (q.startAfter >= 0)
+        query = query.startAfter(q.startAfter);
+    const snap = await query.get();
+    const ruleResults = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    const lastOrder = snap.docs.length ? snap.docs[snap.docs.length - 1].data().order : null;
+    res.json({ ruleResults, nextStartAfter: lastOrder });
+}));
 app.use(errorMiddleware);
 export { app as apiApp };

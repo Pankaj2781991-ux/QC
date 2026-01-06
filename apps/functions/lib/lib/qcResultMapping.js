@@ -42,11 +42,12 @@ function firstReasonFromEvidence(evidence) {
     return e?.message;
 }
 function evidenceToRefs(evidence, options) {
+    const prefix = typeof options?.contextPrefix === 'string' && options.contextPrefix.length > 0 ? options.contextPrefix : '';
     return (evidence ?? []).map((e) => {
         const ref = {
             kind: 'GENERIC',
             title: e.type,
-            detail: e.message,
+            detail: prefix && e.message ? `${prefix}${e.message}` : e.message,
             ...(options?.storagePath || options?.fileName || options?.contentType
                 ? {
                     source: {
@@ -79,7 +80,10 @@ export function mapRuleResultToDoc(input) {
         severity: input.result.severity,
         status,
         score: input.result.score,
-        evidence: evidenceToRefs(input.result.evidence ?? [], input.source)
+        evidence: evidenceToRefs(input.result.evidence ?? [], {
+            ...(input.source ?? {}),
+            ...(input.contextPrefix ? { contextPrefix: input.contextPrefix } : {})
+        })
     };
     const reason = status === 'FAIL' || status === 'NOT_EVALUATED' ? firstReasonFromEvidence(input.result.evidence ?? []) : undefined;
     const withReason = reason ? { ...base, reason } : base;
